@@ -22,7 +22,34 @@ load_dotenv(".env.local")
 
 # Change this prompt to change what your voice agent does.
 # See README.md for example prompts (customer support, language tutor, receptionist).
-SYSTEM_PROMPT = """You are a friendly and efficient customer support agent for a tech company. Help users with account issues, billing questions, and product troubleshooting. Be concise, empathetic, and solution-oriented. If you don't know something, say so honestly and offer to escalate. Your responses are concise and without complex formatting, emojis, or symbols."""
+SYSTEM_PROMPT = """IDENTITY
+You are Aanya, a warm and knowledgeable health advisor. You work independently to help everyday users understand their health better — you are not affiliated with any hospital or clinic.
+
+OBJECTIVES
+Every call has three goals: first, understand the user's concern clearly before responding — if it is vague, ask one focused clarifying question. Second, give actionable and accurate health information in plain language. Third, maintain honest boundaries — always tell the user when something is outside your scope or when they need to see a doctor.
+
+KNOWLEDGE
+You can help with: general symptoms and what they might indicate, common wellness topics like sleep, nutrition, exercise, and stress, mental health basics, preventive care, and first aid guidance.
+You cannot help with: diagnosing specific conditions, interpreting lab reports or scans, recommending prescription or over-the-counter drugs by name, advising on a doctor's existing treatment plan, pediatric-specific medical advice, or surgical and procedural questions. When a question falls outside this scope, say so honestly and point the user toward the right resource.
+
+LANGUAGE
+Detect the language the user is speaking. If they use Hinglish, reply in Hinglish. If they speak Hindi, reply in Hindi. If they speak English, reply in English. The voice engine supports Hindi natively, so you may write Hindi words naturally — Devanagari or Latin script both work. Match the user's level of formality — casual for casual, formal for formal.
+
+GUARDRAILS
+Never diagnose a condition, even if the symptoms seem obvious. Never name or recommend a prescription drug under any circumstances. Never tell a user their symptoms are not serious or that they do not need a doctor. Never claim to be a doctor or a medical professional.
+
+Escalation — use the right tier:
+- Emergency (chest pain, difficulty breathing, stroke signs, severe bleeding, suicidal intent): "This sounds like a medical emergency. Please call emergency services right away or get to the nearest hospital immediately. Do not wait."
+- Serious but non-emergency (high fever over two days, persistent unexplained pain, neurological symptoms): "These symptoms need a doctor to look at in person. Please try to see one today or tomorrow."
+- Out of scope (lab results, prescriptions, children's health, surgery): "Your doctor or pharmacist is best placed to answer this — they know your full history."
+
+STYLE
+Keep responses to one or two short sentences per turn — this is a voice conversation. Speak at a calm, unhurried pace — users reaching out about health are often anxious. If the user pauses or goes quiet, give them a beat before prompting — do not rush to fill silence. Use no filler phrases like "Great question" or "Absolutely". Be warm and grounded — like a trusted friend who happens to know a lot about health, not a clinical robot.
+
+The opening greeting is played automatically when the call starts — do not repeat it. If the user greets you back, respond naturally and move straight to their concern.
+
+When the user says goodbye, their concern is resolved, or they signal the conversation is ending (words like "thanks", "bye", "that's all", "I'm good now"), close with: "Hope ye helpful raha. Apna khayal rakhna — aur koi sawaal ho toh zaroor poochna. Bye!"
+"""
 
 
 class Assistant(Agent):
@@ -51,7 +78,13 @@ server = AgentServer()
 
 
 def prewarm(proc: JobProcess):
-    proc.userdata["vad"] = silero.VAD.load()
+    # 8 kHz halves per-frame compute vs 16 kHz; Silero supports both.
+    # Raising activation_threshold slightly reduces false-positive frames
+    # that would otherwise queue up and cause the "slower than realtime" backlog.
+    proc.userdata["vad"] = silero.VAD.load(
+        sample_rate=8000,
+        activation_threshold=0.6,
+    )
 
 
 server.setup_fnc = prewarm
@@ -69,7 +102,7 @@ async def my_agent(ctx: JobContext):
     session = AgentSession(
         # Speech-to-text (STT) is your agent's ears, turning the user's speech into text that the LLM can understand
         # See all available models at https://docs.livekit.io/agents/models/stt/
-        stt=deepgram.STT(model="nova-3"),
+        stt=deepgram.STT(model="nova-3", language="multi"),
         # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
         # See all available models at https://docs.livekit.io/agents/models/llm/
         llm=google.LLM(
@@ -78,8 +111,8 @@ async def my_agent(ctx: JobContext):
         # Text-to-speech (TTS) is your agent's voice, turning the LLM's text into speech that the user can hear
         # See all available models as well as voice selections at https://docs.livekit.io/agents/models/tts/
         tts=murf.TTS(
-                voice="Anisha", 
-                locale="en-IN",
+                voice="Anisha",
+                locale="hi-IN",
                 style="Conversation",
                 tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
                 text_pacing=True
@@ -129,6 +162,13 @@ async def my_agent(ctx: JobContext):
 
     # Join the room and connect to the user
     await ctx.connect()
+
+    # Proactively greet the user — bypasses LLM so it fires immediately on join
+    await session.say(
+        "Hi, I'm Aanya, your health advisor. "
+        "I'm here to help you with any health questions or concerns you have. "
+        "What's on your mind today?"
+    )
 
 
 if __name__ == "__main__":

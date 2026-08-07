@@ -27,11 +27,11 @@ cp .env.example .env.local
 
 Fill in your keys in `.env.local`:
 
-| Variable             | Where to get it                                           |
-| -------------------- | --------------------------------------------------------- |
-| `LIVEKIT_URL`        | [LiveKit Cloud](https://cloud.livekit.io/) → Settings     |
-| `LIVEKIT_API_KEY`    | [LiveKit Cloud](https://cloud.livekit.io/) → Settings     |
-| `LIVEKIT_API_SECRET` | [LiveKit Cloud](https://cloud.livekit.io/) → Settings     |
+| Variable               | Where to get it                                          |
+| ---------------------- | -------------------------------------------------------- |
+| `LIVEKIT_URL`        | [LiveKit Cloud](https://cloud.livekit.io/) → Settings    |
+| `LIVEKIT_API_KEY`    | [LiveKit Cloud](https://cloud.livekit.io/) → Settings    |
+| `LIVEKIT_API_SECRET` | [LiveKit Cloud](https://cloud.livekit.io/) → Settings    |
 | `MURF_API_KEY`       | [murf.ai/api/dashboard](https://murf.ai/api/dashboard)    |
 | `DEEPGRAM_API_KEY`   | [deepgram.com](https://console.deepgram.com/)             |
 | `GOOGLE_API_KEY`     | [aistudio.google.com](https://aistudio.google.com/apikey) |
@@ -149,8 +149,8 @@ tts=murf.TTS(
 
 Some voice options:
 
-| Voice ID | Description                      |
-| -------- | -------------------------------- |
+| Voice ID   | Description                      |
+| ---------- | -------------------------------- |
 | `Anisha` | Indian English, female (default) |
 | `Pooja`  | Indian English, female           |
 | `Samar`  | Indian English, male             |
