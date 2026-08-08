@@ -5,7 +5,7 @@
   "tsx": true,
   "tailwind": {
     "config": "",
-    "css": "app/globals.css",
+    "css": "styles/globals.css",
     "baseColor": "neutral",
     "cssVariables": true,
     "prefix": ""
@@ -20,6 +20,7 @@
   },
   "registries": {
     "@agents-ui": "https://livekit.io/ui/r/{name}.json",
-    "@ai-elements": "https://registry.ai-sdk.dev/{name}.json"
+    "@ai-elements": "https://registry.ai-sdk.dev/{name}.json",
+    "@react-bits": "https://reactbits.dev/r/{name}.json"
   }
 }

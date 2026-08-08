@@ -151,6 +151,8 @@ export interface AgentSessionView_01Props {
   audioVisualizerRadialRadius?: number;
   /** Stroke width of the wave path when `audioVisualizerType` is `wave`. */
   audioVisualizerWaveLineWidth?: number;
+  /** When true the session view renders in the Connecting state before the room is ready. */
+  isConnecting?: boolean;
   /** Optional class name merged onto the outer `<section>` container. */
   className?: string;
 }
@@ -161,6 +163,7 @@ export function AgentSessionView_01({
   supportsVideoInput = true,
   supportsScreenShare = true,
   isPreConnectBufferEnabled = true,
+  isConnecting = false,
 
   audioVisualizerType,
   audioVisualizerColor,
@@ -180,6 +183,29 @@ export function AgentSessionView_01({
   const [chatOpen, setChatOpen] = useState(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const { state: agentState } = useAgent();
+
+  // Track if the room was ever connected so we can show "Call ended" after disconnect.
+  const wasConnectedRef = useRef(false);
+  useEffect(() => {
+    if (session.isConnected) wasConnectedRef.current = true;
+  }, [session.isConnected]);
+
+  type StatusLabel = 'Ready' | 'Connecting' | 'Listening' | 'Speaking' | 'Call ended';
+  const statusLabel: StatusLabel = (() => {
+    if (!session.isConnected && wasConnectedRef.current) return 'Call ended';
+    if (isConnecting) return 'Connecting';
+    if (agentState === 'speaking' || agentState === 'thinking') return 'Speaking';
+    if (agentState === 'listening') return 'Listening';
+    return 'Ready';
+  })();
+
+  const statusDotClass: Record<StatusLabel, string> = {
+    Ready: 'bg-emerald-500',
+    Connecting: 'bg-amber-400 animate-pulse',
+    Listening: 'bg-blue-500 animate-pulse',
+    Speaking: 'bg-violet-500 animate-pulse',
+    'Call ended': 'bg-slate-400',
+  };
 
   const controls: AgentControlBarControls = {
     leave: true,
@@ -241,6 +267,23 @@ export function AgentSessionView_01({
         {...BOTTOM_VIEW_MOTION_PROPS}
         className="absolute inset-x-3 bottom-0 z-50 md:inset-x-12"
       >
+        {/* Status label */}
+        <div className="flex justify-center pb-3">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={statusLabel}
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.25 }}
+              className="inline-flex items-center gap-2 rounded-full bg-black/60 px-4 py-1.5 text-xs font-semibold text-white backdrop-blur-sm"
+            >
+              <span className={cn('size-2 rounded-full', statusDotClass[statusLabel])} />
+              {statusLabel}
+            </motion.div>
+          </AnimatePresence>
+        </div>
+
         {/* Pre-connect message */}
         {isPreConnectBufferEnabled && (
           <AnimatePresence>

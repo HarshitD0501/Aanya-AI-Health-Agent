@@ -41,9 +41,9 @@ export function App({ appConfig }: AppProps) {
   return (
     <AgentSessionProvider session={session}>
       <AppSetup />
-      <main className="grid h-svh grid-cols-1 place-content-center">
+      <div className="min-h-svh">
         <ViewController appConfig={appConfig} />
-      </main>
+      </div>
       <StartAudioButton label="Start Audio" />
       <Toaster
         icons={{
