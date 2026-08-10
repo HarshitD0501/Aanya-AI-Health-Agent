@@ -531,36 +531,12 @@ export const WelcomeView = ({
               }}
               className="relative mx-auto w-full max-w-[560px] lg:mx-0"
             >
-              <div className="aanya-voice-stage relative aspect-[1/1.05] overflow-hidden rounded-[40px] border border-white/90 bg-white/65 p-6 shadow-[0_40px_120px_-42px_rgba(65,51,140,0.4)] backdrop-blur-xl sm:p-9">
-                <div className="absolute inset-x-8 top-7 flex items-center justify-between text-xs font-semibold text-slate-500 sm:top-9">
-                  <span className="inline-flex items-center gap-2">
-                    <span className="size-2 rounded-full bg-emerald-500" /> Ready to listen
-                  </span>
-                  <span>Voice session</span>
-                </div>
-
-                <div className="absolute inset-0 grid place-items-center" aria-hidden="true">
-                  <div className="aanya-orb-ring aanya-orb-ring-one" />
-                  <div className="aanya-orb-ring aanya-orb-ring-two" />
-                  <div className="aanya-orb relative grid size-[48%] place-items-center rounded-full sm:size-[50%]">
-                    <div className="aanya-orb-core grid size-[42%] place-items-center rounded-full text-white shadow-2xl shadow-violet-950/20">
-                      <MicrophoneIcon className="size-9 sm:size-11" />
-                    </div>
-                  </div>
-                </div>
-
-                <div
-                  className="absolute inset-x-0 bottom-[22%] flex h-10 items-center justify-center gap-1.5"
-                  aria-hidden="true"
-                >
-                  {[14, 24, 34, 22, 40, 28, 18].map((height, index) => (
-                    <span
-                      key={`${height}-${index}`}
-                      className="aanya-wave-bar w-1 rounded-full bg-violet-500/65"
-                      style={{ height, animationDelay: `${index * -0.13}s` }}
-                    />
-                  ))}
-                </div>
+              <div className="aanya-voice-stage relative aspect-[1/1.05] overflow-hidden rounded-[40px] border border-white/90 bg-white/65 shadow-[0_40px_120px_-42px_rgba(65,51,140,0.4)] backdrop-blur-xl">
+                <img
+                  src="/aanya-advisor.jpg"
+                  alt="Aanya — AI Health Advisor"
+                  className="absolute inset-0 h-full w-full object-cover rounded-[40px]"
+                />
 
                 <div className="absolute right-5 bottom-5 left-5 flex items-center gap-3 rounded-2xl border border-white bg-white/90 p-3.5 shadow-lg shadow-slate-950/5 backdrop-blur sm:right-7 sm:bottom-7 sm:left-7 sm:p-4">
                   <BrandMark className="size-9 rounded-xl" />
@@ -574,13 +550,6 @@ export const WelcomeView = ({
                     Live
                   </span>
                 </div>
-              </div>
-
-              <div className="absolute -top-4 -right-2 hidden rounded-2xl border border-white bg-white/90 px-4 py-3 shadow-xl shadow-violet-950/10 backdrop-blur sm:block">
-                <p className="text-[10px] font-bold tracking-[0.13em] text-violet-600 uppercase">
-                  Powered by
-                </p>
-                <p className="mt-1 text-sm font-bold text-[#111a2e]">Murf Falcon + LiveKit</p>
               </div>
             </motion.div>
           </div>

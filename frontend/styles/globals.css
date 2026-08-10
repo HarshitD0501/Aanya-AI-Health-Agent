@@ -137,7 +137,7 @@
 
 .aanya-hero-support {
   max-width: 12ch;
-  margin-top: clamp(0.8rem, 1.5vw, 1.15rem);
+  margin-top: clamp(0.8rem, 0.5vw, 1.15rem);
   font-size: clamp(2rem, 4.2vw, 4rem);
   line-height: 0.96;
   color: #10182b;

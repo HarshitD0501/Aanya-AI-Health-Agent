@@ -20,6 +20,7 @@ from livekit.plugins import deepgram, google, murf, noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 import db
+import health_services
 
 logger = logging.getLogger("agent")
 
@@ -55,7 +56,18 @@ MEMORY,TOOLS & CONSENT (DAY 4 - HEALTH ACCESS TRACK)
 - HARD RULE (HEALTH ACCESS CONSENT): Before calling `save_caller_memory`, you MUST ALWAYS ask explicit permission from the caller first in their language.
 - Call `save_caller_memory` ONLY if the caller explicitly says YES / agrees. If the caller says NO / declines or refuses to share their name, DO NOT save anything, respect their privacy, and reassure them that no data was saved.
 - Save ONLY relevant health facts: `age_band`, `ongoing_conditions`, `last_triage_outcome`. NEVER store full conversation transcripts, prescriptions, or sensitive ID numbers.
-- If the user asks to erase their data ("मेरी जानकारी हटा दो" / "forget me"), call `forget_caller`.
+DAY 5 REAL-WORLD DOMAIN TOOLS (PHC & PUBLIC AUTHORIZED HEALTH CENTERS LOOKUP)
+- You have external domain tools: `lookup_nearest_phc` and `lookup_emergency_helpline`.
+- NEAREST HOSPITAL USER REQUEST FLOW (STRICT 2-STEP INTERACTIVE WORKFLOW):
+  0. DO NOT ask for location in the starting opening greeting! Ask for location ONLY when the user explicitly asks for nearest hospital or health center.
+  1. When a user asks for nearest hospitals or authorized health centers (e.g., "suggest nearest hospital", "mujhe nearest hospital batao"):
+  2. DO NOT call `lookup_nearest_phc` yet if location is not explicitly stated in that sentence or saved in memory!
+  3. STEP 1 (ASK LOCATION): You MUST ask the user first: "आप किस शहर, जिले या स्थान पर हैं?" (Which city, district, or place are you located in?).
+  4. STEP 2 (FETCH & SUGGEST): As soon as the user states or replies with their location/city, IMMEDIATELY call `lookup_nearest_phc` passing the EXACT location spoken by the user (do NOT use any default or guessed city).
+  5. STEP 3 (SUGGEST): Read out the returned nearest hospitals and Public Authorized Health Centers clearly in spoken prose.
+- DATA FRESHNESS: Always mention that the data is from the 2026 National Health Registry / OpenStreetMap.
+- NATURAL SPOKEN OUTPUT: Speak facility name, address, and phone number naturally. NEVER read out raw JSON!
+- GRACEFUL FAILURE HANDLING: If the tool returns an error or timeout, speak a calm, helpful fallback message advising them to call 108 Emergency Ambulance or visit their nearest civil hospital.
 
 GUARDRAILS
 Never diagnose a condition, even if the symptoms seem obvious. Never name or recommend a prescription drug under any circumstances. Never tell a user their symptoms are not serious or that they do not need a doctor. Never claim to be a doctor or a medical professional.
@@ -89,7 +101,7 @@ Even if the user says "bye", "bye bye", "thank you", "thanks", "धन्यव�
    - English: "Thank you Ramesh! Please take good care of your health. Goodbye!"
    - Hindi: "धन्यवाद रमेश जी! अपना ख्याल रखिएगा। आपका धन्यवाद!"
 
-4. IF CALLER NAME IS ALREADY KNOWN/SAVED FROM START: Skip steps 1 & 2 and directly give the warm farewell addressing them by name (DO NOT ASK FOR NAME OR CONSENT AGAIN!).
+5. AUTOMATIC CALL DISCONNECT ON FAREWELL: Whenever you deliver the final farewell statement (e.g. "धन्यवाद Harshit जी! अपना ख्याल रखिएगा।"), you MUST call the `end_call` tool! Calling `end_call` cuts the call automatically and returns the user to the landing page.
 """
 
 
@@ -187,6 +199,101 @@ class Assistant(Agent):
             return f"Successfully deleted caller memory for '{user_id_or_name}'."
         return f"No memory record found to delete for '{user_id_or_name}'."
 
+    @function_tool
+    async def end_call(self, context: RunContext) -> str:
+        """Disconnect and end the call after delivering the final farewell statement (e.g. after saying 'धन्यवाद' or 'Thank you').
+
+        Call this tool IMMEDIATELY when delivering the final farewell statement to cut the call and return the user to the landing page.
+        """
+        logger.info("Ending call per LLM request after farewell.")
+
+        async def disconnect_later():
+            await asyncio.sleep(2.5)  # Allow final TTS playout to complete
+            try:
+                if hasattr(context, "session") and context.session:
+                    await context.session.aclose()
+            except Exception as e:
+                logger.warning(f"Error closing session on end_call: {e}")
+            try:
+                if hasattr(context, "room") and context.room:
+                    await context.room.disconnect()
+            except Exception as e:
+                logger.warning(f"Error disconnecting room on end_call: {e}")
+
+        asyncio.create_task(disconnect_later())
+        return "Call ending sequence initiated. Disconnecting room in 2.5 seconds."
+
+    @function_tool
+    async def lookup_nearest_phc(
+        self,
+        context: RunContext,
+        location: str = "",
+        facility_type: str = "PHC",
+        simulated_failure: bool = False,
+    ) -> str:
+        """Look up nearest Primary Health Centre (PHC), Community Health Centre (CHC), or Civil Hospital for a location or district.
+
+        Tool Chaining: If location is not provided by user, this tool checks saved caller location from memory.
+
+        Args:
+            location: The exact city, district, or pincode explicitly spoken by the caller. Leave empty if caller has not mentioned location yet.
+            facility_type: Type of facility e.g. 'PHC', 'CHC', 'Hospital'
+            simulated_failure: Set to True ONLY if testing offline network failure path.
+        """
+        # Tool chaining: check session userdata / caller memory for saved location if missing
+        if not location and hasattr(context, "session") and hasattr(context.session, "userdata"):
+            location = context.session.userdata.get("location", "")
+
+        if not location:
+            return (
+                "Location is missing! DO NOT suggest any hospital yet. "
+                "You MUST ask the caller: 'आप किस शहर, जिले या स्थान पर हैं?' (Which city, district, or place are you located in?) first!"
+            )
+
+        logger.info(f"Looking up health facility for location='{location}', facility_type='{facility_type}'")
+        try:
+            result = health_services.search_health_facilities(
+                location_or_pincode=location,
+                facility_type=facility_type,
+                simulated_failure=simulated_failure,
+            )
+            return json.dumps(result, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Error looking up health facility: {e}")
+            return json.dumps(
+                {
+                    "status": "error",
+                    "message": "Live health registry lookup service timed out.",
+                    "data_source": health_services.DATA_SOURCE_ATTRIBUTION,
+                    "fallback_recommendation": (
+                        "Please dial 108 for emergency ambulance support or visit your nearest district civil hospital."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+
+    @function_tool
+    async def lookup_emergency_helpline(self, context: RunContext, category: str = "general") -> str:
+        """Look up official government emergency and health helplines (108 Ambulance, 104 Health advice, 14416 Tele-MANAS).
+
+        Args:
+            category: Type of helpline needed e.g. 'ambulance', 'mental_health', 'maternal', 'general'
+        """
+        logger.info(f"Looking up emergency helpline for category='{category}'")
+        try:
+            result = health_services.get_emergency_helpline(category=category)
+            return json.dumps(result, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Error looking up helpline: {e}")
+            return json.dumps(
+                {
+                    "status": "error",
+                    "message": "Helpline directory unavailable.",
+                    "fallback_recommendation": "For emergencies, please dial 108 immediately.",
+                },
+                ensure_ascii=False,
+            )
+
 
 server = AgentServer()
 
@@ -254,6 +361,8 @@ async def my_agent(ctx: JobContext):
 
     assistant = Assistant(instructions=agent_instructions)
 
+    saved_location = caller_record.get("facts", {}).get("location", "") if caller_record else ""
+
     session = AgentSession(
         stt=deepgram.STT(model="nova-3", language="multi"),
         llm=google.LLM(
@@ -268,21 +377,7 @@ async def my_agent(ctx: JobContext):
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
         preemptive_generation=True,
-        userdata={"phone_number": phone_number, "ip_address": ip_address},
-    )
-
-    await session.start(
-        agent=assistant,
-        room=ctx.room,
-        room_options=room_io.RoomOptions(
-            audio_input=room_io.AudioInputOptions(
-                noise_cancellation=lambda params: (
-                    noise_cancellation.BVCTelephony()
-                    if params.participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
-                    else noise_cancellation.BVC()
-                ),
-            ),
-        ),
+        userdata={"phone_number": phone_number, "ip_address": ip_address, "location": saved_location},
     )
 
     if caller_record:
@@ -316,9 +411,22 @@ async def my_agent(ctx: JobContext):
     else:
         greeting_msg = (
             "नमस्ते! मैं आन्या हूँ, आपकी हेल्थ एडवाइजर। "
-            "मैं आपकी सेहत से जुड़े किसी भी सवाल में मदद करने के लिए यहाँ हूँ। "
             "आज आपकी क्या सहायता कर सकती हूँ?"
         )
+
+    await session.start(
+        agent=assistant,
+        room=ctx.room,
+        room_options=room_io.RoomOptions(
+            audio_input=room_io.AudioInputOptions(
+                noise_cancellation=lambda params: (
+                    noise_cancellation.BVCTelephony()
+                    if params.participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
+                    else noise_cancellation.BVC()
+                ),
+            ),
+        ),
+    )
 
     await session.say(greeting_msg)
 
