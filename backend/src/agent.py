@@ -1,7 +1,10 @@
+import asyncio
 import json
 import logging
-from dotenv import load_dotenv
+import re
+import time
 
+from dotenv import load_dotenv
 from livekit import rtc
 from livekit.agents import (
     Agent,
@@ -12,7 +15,6 @@ from livekit.agents import (
     RunContext,
     cli,
     function_tool,
-    inference,
     room_io,
     tokenize,
 )
@@ -21,6 +23,7 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 import db
 import health_services
+import reminders
 
 logger = logging.getLogger("agent")
 
@@ -69,6 +72,21 @@ DAY 5 REAL-WORLD DOMAIN TOOLS (PHC & PUBLIC AUTHORIZED HEALTH CENTERS LOOKUP)
 - NATURAL SPOKEN OUTPUT: Speak facility name, address, and phone number naturally. NEVER read out raw JSON!
 - GRACEFUL FAILURE HANDLING: If the tool returns an error or timeout, speak a calm, helpful fallback message advising them to call 108 Emergency Ambulance or visit their nearest civil hospital.
 
+DAY 6 MEDICATION REMINDER CALLS (YOU CAN ACTUALLY SET THESE - DO NOT DENY IT)
+- You have tools: `schedule_medicine_reminder`, `list_my_reminders`, `opt_out_of_reminders`.
+- YES, YOU CAN SET REMINDERS. When a caller asks you to remind them about a medicine ("reminder laga sakti ho kya?", "मुझे दवा याद दिला दीजिए", "set a daily reminder for me"), you MUST NEVER say you cannot, and you MUST NEVER redirect them to a phone alarm, Google Assistant, Siri, or a family member. That is now a real capability you own.
+- WHAT IT ACTUALLY IS: a daily phone call from you at the time they choose, asking whether they have taken that medicine. Say this in one plain sentence so they know their phone will ring - do not describe it as an app notification.
+- COLLECT THREE THINGS, ONE QUESTION PER TURN (never ask for all three at once):
+  1. Which medicine - in their exact words. NEVER suggest, guess, complete or substitute a medicine name; that would be prescribing, which you never do.
+  2. What time every day - then convert their spoken answer to 24-hour HH:MM yourself before calling the tool ("रात आठ बजे" → "20:00", "eight in the morning" → "08:00", "saade nau raat" → "21:30").
+  3. Their mobile number - ask them to say the ten digits. NEVER invent, complete or assume a number. A browser call gives you no number, so you must ask. If they refuse to share it, tell them honestly that without a number you cannot call them, and offer to talk them through their routine instead.
+- Dosage is optional. If they volunteer it ("khaane ke baad ek tablet"), pass it along; never interrogate them for it.
+- ALWAYS pass `language` as the language this conversation is happening in, so the reminder call itself comes in that same language.
+- ALWAYS pass `caller_name`, because the reminder call opens by greeting them by name. If you do not know it yet, ask for it first.
+- AFTER SAVING: confirm the medicine and the time, read the phone number back digit by digit so they can catch a wrong digit, and tell them they can stop the calls any time by saying "रिमाइंडर बंद करें" (Hindi) or "stop the reminders" (English).
+- IF THEY ASK WHAT REMINDERS THEY ALREADY HAVE: call `list_my_reminders` and read the answer out as natural speech, never as a raw list.
+- IF THEY ASK TO STOP THE CALLS: call `opt_out_of_reminders` immediately. Never ask why, never try to talk them out of it.
+
 GUARDRAILS
 Never diagnose a condition, even if the symptoms seem obvious. Never name or recommend a prescription drug under any circumstances. Never tell a user their symptoms are not serious or that they do not need a doctor. Never claim to be a doctor or a medical professional.
 
@@ -103,6 +121,194 @@ Even if the user says "bye", "bye bye", "thank you", "thanks", "धन्यव�
 
 5. AUTOMATIC CALL DISCONNECT ON FAREWELL: Whenever you deliver the final farewell statement (e.g. "धन्यवाद Harshit जी! अपना ख्याल रखिएगा।"), you MUST call the `end_call` tool! Calling `end_call` cuts the call automatically and returns the user to the landing page.
 """
+
+# ---------------------------------------------------------------------------
+# Day 6 — Outbound medication reminder calls
+#
+# Outbound is a different social contract from inbound: the caller did not ask
+# to be called and does not know who we are. This block REPLACES the inbound
+# "ask for their name before you say bye" rule, because on an outbound call we
+# already know who they are - we dialled them.
+# ---------------------------------------------------------------------------
+OUTBOUND_PROMPT = """
+=== OUTBOUND MEDICATION REMINDER CALL (THIS CALL) ===
+YOU placed this call. The caller did NOT dial you and is not expecting you.
+
+CALL DETAILS:
+- Caller's name: {name}
+- Medicine: {medicine_name}
+- Dosage: {dosage}
+- Reminder time they chose: {schedule_time}
+- Language for this call: {language}
+
+OPENING (ALREADY SPOKEN): The very first thing said on this call identified who
+is calling, why, and how to stop the calls. Do NOT repeat that introduction and
+do NOT introduce yourself again.
+
+YOUR ONLY GOAL: confirm whether they have taken {medicine_name}. Then close.
+- If they say they took it: acknowledge warmly, confirm the next dose is at the same time tomorrow, and close.
+- If they say they have NOT taken it: gently ask them to take it now if it is safe to do so, and remind them of the dosage ({dosage}).
+- If they ask a health question, answer it briefly within your normal scope and guardrails, then close.
+
+STRICT OUTBOUND RULES:
+1. DO NOT ask for their name. You already know it: {name}.
+2. DO NOT ask for consent to save memory. This is a reminder call, not an intake call.
+3. DO NOT ask them where they are located unless they ask for a hospital.
+4. KEEP IT SHORT. Two or three exchanges, then close. This is an interruption in their day - respect it.
+5. NAME USAGE: use "{name}" only in the opening and the final farewell, never mid-conversation.
+6. NEVER name or recommend any medicine other than the one they themselves registered: {medicine_name}. You are reminding, not prescribing.
+7. IF THEY ASK FOR ANOTHER REMINDER (a second medicine they name themselves, or a different time), call `schedule_medicine_reminder` with the number we already dialled, confirm it in one sentence, then close.
+
+OPT-OUT (NON-NEGOTIABLE - THIS IS A REGULATORY REQUIREMENT):
+If the caller says ANY of: "stop calling", "don't call me", "unsubscribe", "बंद करो",
+"रिमाइंडर बंद करें", "मुझे कॉल न करें", "फोन न करें", or expresses any wish to not be
+called again - you MUST:
+  1. Call the `opt_out_of_reminders` tool IMMEDIATELY.
+  2. Confirm it out loud in their language, e.g. Hindi: "ठीक है, मैंने आपके रिमाइंडर बंद कर दिए हैं। अब आपको ये कॉल नहीं आएंगी।" / English: "Done, I have stopped your reminder calls. You will not receive these again."
+  3. Then apologise briefly for the disturbance, say farewell, and call `end_call`.
+Never argue, never try to talk them out of it, never ask why.
+
+IF THEY SOUND BUSY OR ANNOYED: apologise once, deliver the reminder in one
+sentence, and close immediately. Do not push the conversation.
+
+CLOSING: deliver the farewell in their language, then call `end_call`.
+- Hindi: "धन्यवाद {name} जी! अपना ख्याल रखिएगा।"
+- English: "Thank you {name}! Please take care of your health."
+"""
+
+
+# A reminder call has no reason to run long. This cap protects against a wedged
+# SIP leg holding a trunk channel open and quietly draining trial credit.
+MAX_OUTBOUND_CALL_SEC = 180
+
+# How long we wait for the callee to actually pick up. LiveKit creates the SIP
+# participant the moment the dial starts, so "participant exists" only means the
+# phone is ringing - see _wait_until_sip_answered.
+SIP_ANSWER_TIMEOUT_SEC = 45
+
+
+def _normalize_phone_e164(raw: str) -> str:
+    """Best-effort E.164 for a number spoken out loud over a call.
+
+    Returns "" when the digits cannot be a dialable number, so the caller gets
+    asked to repeat instead of us saving a reminder that will never ring.
+    """
+    text = (raw or "").strip()
+    digits = re.sub(r"\D", "", text)
+    if not digits:
+        return ""
+    if text.startswith("+"):
+        return "+" + digits if 10 <= len(digits) <= 15 else ""
+    if len(digits) == 10 and digits[0] in "6789":  # Indian mobile, spoken bare
+        return "+91" + digits
+    if len(digits) == 11 and digits.startswith("0"):  # STD-prefixed
+        return "+91" + digits[1:]
+    if len(digits) == 12 and digits.startswith("91"):
+        return "+" + digits
+    if 11 <= len(digits) <= 15:
+        return "+" + digits
+    return ""
+
+
+def _normalize_clock(raw: str) -> str:
+    """Coerce a time into 'HH:MM', or "" if it is not a clock time at all.
+
+    The LLM is asked for 24-hour time, but it hands back "8 pm" and "8.30" often
+    enough that parsing those is cheaper than re-prompting mid-call.
+    """
+    text = (raw or "").strip().lower().replace(" ", "")
+    if not text:
+        return ""
+    match = re.fullmatch(r"(\d{1,2})(?:[:.h]?(\d{2}))?(am|pm)?", text)
+    if not match:
+        return ""
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    suffix = match.group(3)
+    if suffix == "pm" and hour < 12:
+        hour += 12
+    elif suffix == "am" and hour == 12:
+        hour = 0
+    if hour > 23 or minute > 59:
+        return ""
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _spoken_time(schedule_time: str, language: str) -> str:
+    """Turn 'HH:MM' into something a TTS voice reads naturally.
+
+    Murf reads "20:00" as "twenty colon zero zero", so we spell the clock time
+    out in words instead. Falls back to the raw string on bad input.
+    """
+    hindi_numbers = {
+        1: "एक", 2: "दो", 3: "तीन", 4: "चार", 5: "पाँच", 6: "छह",
+        7: "सात", 8: "आठ", 9: "नौ", 10: "दस", 11: "ग्यारह", 12: "बारह",
+    }
+    try:
+        hour, minute = (int(part) for part in schedule_time.split(":", 1))
+    except (ValueError, AttributeError):
+        return schedule_time
+
+    hour_12 = hour % 12 or 12
+    if language == "English":
+        period = "in the morning" if hour < 12 else "in the evening" if hour < 17 else "at night"
+        clock = f"{hour_12}" if minute == 0 else f"{hour_12}:{minute:02d}"
+        return f"{clock} {period}"
+
+    # Hindi day parts: सुबह (morning), दोपहर (afternoon), शाम (evening), रात (night).
+    if hour < 12:
+        period = "सुबह"
+    elif hour < 16:
+        period = "दोपहर"
+    elif hour < 20:
+        period = "शाम"
+    else:
+        period = "रात"
+    hour_word = hindi_numbers.get(hour_12, str(hour_12))
+    if minute == 0:
+        return f"{period} {hour_word} बजे"
+    return f"{period} {hour_word} बजकर {minute} मिनट"
+
+
+def build_outbound_opening(call_info: dict) -> str:
+    """The first two sentences of an outbound call.
+
+    Day 6 requires the opening to state WHO is calling, WHY, and HOW TO STOP -
+    all before anything else, because the caller never asked for this call.
+    """
+    name = call_info.get("name") or "जी"
+    medicine = call_info.get("medicine_name") or "your medicine"
+    language = call_info.get("language_preference", "Hindi")
+    when = _spoken_time(call_info.get("schedule_time", ""), language)
+
+    if language == "English":
+        opening = (
+            f"Hello {name}, this is Aanya calling from your health reminder service. "
+            f"You had set a reminder for {medicine}"
+        )
+        if when:
+            opening += f" at {when}"
+        opening += (
+            ", so this is that reminder call. "
+            "If you would like these calls to stop, just say \"stop the reminders\" "
+            "and I will switch them off right away. "
+            f"Have you taken your {medicine} today?"
+        )
+        return opening
+
+    opening = (
+        f"नमस्ते {name} जी, मैं आन्या बोल रही हूँ — आपकी हेल्थ रिमाइंडर सेवा से। "
+        f"आपने {medicine} के लिए"
+    )
+    if when:
+        opening += f" {when} का"
+    opening += (
+        " रिमाइंडर सेट किया था, इसलिए यह कॉल की है। "
+        "अगर आप ये कॉल बंद करवाना चाहें, तो बस कहिए \"रिमाइंडर बंद करें\", "
+        "मैं तुरंत बंद कर दूँगी। "
+        f"क्या आपने आज {medicine} ले ली है?"
+    )
+    return opening
 
 
 class Assistant(Agent):
@@ -200,6 +406,200 @@ class Assistant(Agent):
         return f"No memory record found to delete for '{user_id_or_name}'."
 
     @function_tool
+    async def opt_out_of_reminders(self, context: RunContext, user_id_or_phone: str = "") -> str:
+        """Stop all future medication reminder calls for this caller. Call this IMMEDIATELY when the caller says 'stop calling me', 'unsubscribe', 'रिमाइंडर बंद करें', 'मुझे कॉल न करें', or otherwise asks not to be called again.
+
+        Args:
+            user_id_or_phone: Caller's name, user ID, or phone number. Leave empty on an outbound call - the phone number is taken from the call itself.
+        """
+        target = (user_id_or_phone or "").strip()
+
+        # On an outbound call the phone number we dialled is authoritative; trust
+        # it over anything the LLM guessed at.
+        if hasattr(context, "session") and hasattr(context.session, "userdata"):
+            userdata = context.session.userdata or {}
+            target = userdata.get("phone_number", "") or target
+
+        if not target:
+            return "Could not identify the caller to opt out. Ask them for their phone number."
+
+        rows = reminders.opt_out(target)
+        if rows:
+            logger.info(f"Opt-out honoured for '{target}': {rows} reminder(s) disabled.")
+            return (
+                f"Opted out successfully - {rows} reminder(s) disabled for '{target}'. "
+                "Confirm this out loud to the caller, apologise for the disturbance, "
+                "then say farewell and call end_call."
+            )
+        return (
+            f"No active reminders were found for '{target}', so there is nothing left "
+            "to stop. Reassure the caller they will not be called again."
+        )
+
+    @function_tool
+    async def schedule_medicine_reminder(
+        self,
+        context: RunContext,
+        medicine_name: str,
+        time_24h: str,
+        caller_name: str = "",
+        phone_number: str = "",
+        dosage: str = "",
+        language: str = "",
+    ) -> str:
+        """Register a daily medication reminder CALL for this caller. From tomorrow onwards you will phone them at this time every day and ask whether they have taken this medicine. Call this only once you know the medicine, the time, and a phone number to ring.
+
+        Args:
+            medicine_name: The medicine in the caller's own words. NEVER invent or substitute one.
+            time_24h: Daily reminder time in 24-hour 'HH:MM' form, e.g. '20:00' for eight at night.
+            caller_name: The caller's name, used to greet them when the reminder call lands.
+            phone_number: Number to dial, ideally E.164 like '+919876543210'. Leave empty to reuse the number of the current call.
+            dosage: Optional, in their own words, e.g. 'one tablet after dinner'.
+            language: 'Hindi' or 'English' - the language this conversation is happening in.
+        """
+        userdata: dict = {}
+        if hasattr(context, "session") and hasattr(context.session, "userdata"):
+            userdata = context.session.userdata or {}
+
+        target = _normalize_phone_e164(phone_number or userdata.get("phone_number", ""))
+        if not target:
+            return (
+                "No usable phone number yet - a browser call does not give us one. "
+                "Ask the caller to say their 10-digit mobile number digit by digit, "
+                "then call this tool again. Never guess a number."
+            )
+
+        medicine = (medicine_name or "").strip()
+        if not medicine:
+            return "Ask the caller which medicine this reminder is for, then call this tool again."
+
+        when = _normalize_clock(time_24h)
+        if not when:
+            return (
+                f"'{time_24h}' is not a clock time. Ask what time of day they want "
+                "the call, then pass it as 24-hour HH:MM."
+            )
+
+        name = (caller_name or "").strip()
+        if not name:
+            return (
+                "Ask the caller their name first - the reminder call opens by "
+                "greeting them - then call this tool again."
+            )
+
+        lang = "English" if (language or "").strip().lower().startswith("en") else "Hindi"
+
+        # Same medicine, same time, same number is a repeat of what they already
+        # asked for, not a second reminder. Registering it twice would ring them
+        # twice a day.
+        for row in reminders.list_reminders():
+            if (
+                row["phone_number"] == target
+                and row["medicine_name"].strip().lower() == medicine.lower()
+                and row["schedule_time"] == when
+            ):
+                return (
+                    f"That reminder already exists (id {row['reminder_id']}). Tell them "
+                    f"it is already set for {_spoken_time(when, lang)} and do not save a "
+                    "second one."
+                )
+
+        # A caller who opted out earlier and is now asking for a reminder is
+        # opting back in of their own accord, so a fresh active row is correct.
+        reminder_id = reminders.create_reminder(
+            user_id=target,
+            name=name,
+            phone_number=target,
+            medicine_name=medicine,
+            schedule_time=when,
+            dosage=(dosage or "").strip(),
+            language_preference=lang,
+        )
+        logger.info(
+            f"Reminder {reminder_id} scheduled in-conversation: {medicine} at {when} "
+            f"for {name} ({target}), language={lang}."
+        )
+
+        stop_phrase = (
+            '"stop the reminders"' if lang == "English" else '"रिमाइंडर बंद करें"'
+        )
+        detail = f" The dosage they gave is: {dosage.strip()}." if (dosage or "").strip() else ""
+        return (
+            f"Saved as reminder {reminder_id}. Now confirm it out loud in {lang}: you "
+            f"will call them every day at {_spoken_time(when, lang)} to ask about "
+            f"{medicine}.{detail} Read the number back digit by digit as {target} so they "
+            f"can catch a wrong digit, and tell them that saying {stop_phrase} on any "
+            "call stops the reminders for good."
+        )
+
+    @function_tool
+    async def list_my_reminders(self, context: RunContext, phone_number: str = "") -> str:
+        """Read back the medication reminders already set for this caller. Use this when they ask what reminders they have, or before adding one they may already have.
+
+        Args:
+            phone_number: The caller's number. Leave empty to use the number of the current call.
+        """
+        userdata: dict = {}
+        if hasattr(context, "session") and hasattr(context.session, "userdata"):
+            userdata = context.session.userdata or {}
+
+        target = _normalize_phone_e164(phone_number or userdata.get("phone_number", ""))
+        if not target:
+            return (
+                "No phone number for this caller yet. Ask for their 10-digit mobile "
+                "number, then call this tool again."
+            )
+
+        rows = [r for r in reminders.list_reminders() if r["phone_number"] == target]
+        if not rows:
+            return (
+                f"No active reminders for {target}. Offer to set one if they want daily "
+                "reminder calls."
+            )
+
+        lang = rows[0].get("language_preference", "Hindi")
+        listed = "; ".join(
+            f"{r['medicine_name']} at {_spoken_time(r['schedule_time'], lang)}"
+            f"{' (' + r['dosage'] + ')' if r['dosage'] else ''}"
+            for r in rows
+        )
+        return (
+            f"{len(rows)} active reminder(s) for {target}: {listed}. Read these out in "
+            "spoken prose, never as a list of times."
+        )
+
+    @function_tool
+    async def confirm_medicine_taken(
+        self, context: RunContext, taken: bool, note: str = ""
+    ) -> str:
+        """Record whether the caller has taken the medicine this reminder call was about. Call this once the caller answers the question.
+
+        Args:
+            taken: True if the caller says they have taken it, False if they have not.
+            note: Optional short detail, e.g. 'will take it after dinner'.
+        """
+        reminder_id = 0
+        if hasattr(context, "session") and hasattr(context.session, "userdata"):
+            reminder_id = (context.session.userdata or {}).get("reminder_id", 0)
+
+        status = "taken" if taken else "not_taken"
+        logger.info(f"Reminder {reminder_id}: medicine {status}. note='{note}'")
+
+        if not reminder_id:
+            return "Noted. Continue the conversation and close warmly."
+
+        reminders.record_medicine_response(reminder_id, taken=taken, note=note)
+        if taken:
+            return (
+                "Recorded that they have taken it. Acknowledge warmly, mention the "
+                "next dose is at the same time tomorrow, then say farewell and call end_call."
+            )
+        return (
+            "Recorded that they have NOT taken it yet. Gently ask them to take it now "
+            "if it is safe, remind them of the dosage, then say farewell and call end_call."
+        )
+
+    @function_tool
     async def end_call(self, context: RunContext) -> str:
         """Disconnect and end the call after delivering the final farewell statement (e.g. after saying 'धन्यवाद' or 'Thank you').
 
@@ -220,7 +620,8 @@ class Assistant(Agent):
             except Exception as e:
                 logger.warning(f"Error disconnecting room on end_call: {e}")
 
-        asyncio.create_task(disconnect_later())
+        # Keep a reference so the task is not garbage-collected mid-teardown.
+        self._disconnect_task = asyncio.create_task(disconnect_later())
         return "Call ending sequence initiated. Disconnecting room in 2.5 seconds."
 
     @function_tool
@@ -311,7 +712,275 @@ def prewarm(proc: JobProcess):
 server.setup_fnc = prewarm
 
 
-@server.rtc_session(agent_name="Saamiksha")
+def build_session(ctx: JobContext, userdata: dict) -> AgentSession:
+    """The Day 5 voice pipeline. Shared by the inbound and outbound paths so the
+    two can never drift apart."""
+    return AgentSession(
+        stt=deepgram.STT(model="nova-3", language="multi"),
+        llm=google.LLM(
+            model="gemini-3.5-flash-lite",
+        ),
+        tts=murf.TTS(
+            voice="Anisha",
+            style="Conversation",
+            tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
+            text_pacing=True,
+        ),
+        turn_detection=MultilingualModel(),
+        vad=ctx.proc.userdata["vad"],
+        preemptive_generation=True,
+        userdata=userdata,
+    )
+
+
+def _sip_call_status(participant: rtc.RemoteParticipant) -> str:
+    return (getattr(participant, "attributes", {}) or {}).get("sip.callStatus", "")
+
+
+def _has_audio_track(participant: rtc.RemoteParticipant) -> bool:
+    """True once the SIP leg is publishing audio, which only happens after pickup."""
+    publications = getattr(participant, "track_publications", {}) or {}
+    return any(
+        pub.kind == rtc.TrackKind.KIND_AUDIO for pub in publications.values()
+    )
+
+
+async def _wait_until_sip_answered(
+    ctx: JobContext,
+    participant: rtc.RemoteParticipant,
+    timeout: float = SIP_ANSWER_TIMEOUT_SEC,
+) -> str:
+    """Block until the dialled phone is actually picked up.
+
+    This exists because wait_for_participant returns the instant LiveKit creates
+    the SIP participant - which is while the phone is still RINGING, not when it
+    is answered. Speaking then delivers the opening to a ringing line, and the
+    callee hears nothing but silence when they finally pick up. That is exactly
+    the failure Day 6's spoken opening is supposed to prevent.
+
+    Returns 'active' (picked up), 'hangup' (ended while ringing), 'timeout', or
+    'unknown' when the SIP status attribute never arrives at all - in that case
+    the caller should carry on rather than refuse to speak.
+    """
+    if _sip_call_status(participant) == "active" or _has_audio_track(participant):
+        return "active"
+
+    answered = asyncio.Event()
+    ended = asyncio.Event()
+    seen_status = _sip_call_status(participant)
+
+    @ctx.room.on("participant_attributes_changed")
+    def _on_attributes_changed(
+        changed: dict[str, str], p: rtc.RemoteParticipant
+    ) -> None:
+        nonlocal seen_status
+        if p.identity != participant.identity:
+            return
+        status = changed.get("sip.callStatus") or _sip_call_status(p)
+        if not status or status == seen_status:
+            return
+        seen_status = status
+        logger.info(f"SIP call status: {status}")
+        if status == "active":
+            answered.set()
+        elif status == "hangup":
+            ended.set()
+
+    @ctx.room.on("participant_disconnected")
+    def _on_gone_while_ringing(p: rtc.RemoteParticipant) -> None:
+        if p.identity == participant.identity:
+            ended.set()
+
+    # Second, independent answer signal: a SIP leg only starts publishing audio
+    # once it is answered. Relying on sip.callStatus alone would leave Aanya mute
+    # for the whole call if that attribute ever stopped arriving.
+    @ctx.room.on("track_published")
+    def _on_track_published(
+        publication: rtc.RemoteTrackPublication, p: rtc.RemoteParticipant
+    ) -> None:
+        if p.identity == participant.identity and publication.kind == rtc.TrackKind.KIND_AUDIO:
+            logger.info("Callee published audio - treating the call as answered.")
+            answered.set()
+
+    waiters = [
+        asyncio.create_task(answered.wait()),
+        asyncio.create_task(ended.wait()),
+    ]
+    try:
+        _, pending = await asyncio.wait(
+            waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+    finally:
+        ctx.room.off("participant_attributes_changed", _on_attributes_changed)
+        ctx.room.off("participant_disconnected", _on_gone_while_ringing)
+        ctx.room.off("track_published", _on_track_published)
+
+    if answered.is_set():
+        return "active"
+    if ended.is_set():
+        return "hangup"
+    # No status ever arrived: better to speak to a possibly-live line than to sit
+    # mute on a call the callee did answer.
+    return "timeout" if seen_status else "unknown"
+
+
+async def run_outbound_reminder(ctx: JobContext, call_info: dict) -> None:
+    """Drive one outbound medication reminder call end to end.
+
+    Owns the outcomes inbound never has: the callee may never speak (voicemail),
+    may hang up in the first seconds, or may ask us to stop calling. Each is
+    written to the attempt log so the scheduler's retry policy can act on it.
+    """
+    reminder_id = int(call_info.get("reminder_id") or 0)
+    phone_number = call_info.get("phone_number", "")
+    name = call_info.get("name", "")
+    language = call_info.get("language_preference", "Hindi")
+
+    # The dialer sets participant_identity to the phone number, so we wait for
+    # that exact identity rather than "whoever joins" - a stray observer joining
+    # the room must not be mistaken for the callee picking up.
+    try:
+        participant = await asyncio.wait_for(
+            ctx.wait_for_participant(identity=phone_number),
+            timeout=SIP_ANSWER_TIMEOUT_SEC,
+        )
+        logger.info(
+            f"Callee joined: identity='{participant.identity}', name='{participant.name}'"
+        )
+    except Exception as e:
+        # The dialer already recorded why the dial failed, so this is a log line,
+        # not a second attempt row.
+        logger.warning(f"Callee never joined room {ctx.room.name}: {e}")
+        return
+
+    # Joined is not answered. Wait for the pickup before saying a single word.
+    call_state = await _wait_until_sip_answered(ctx, participant)
+    if call_state in ("hangup", "timeout"):
+        logger.info(
+            f"Call to {phone_number} ended while still ringing ({call_state}); "
+            "nothing was spoken. The dialer owns this outcome."
+        )
+        return
+    if call_state == "unknown":
+        logger.warning(
+            "No sip.callStatus ever arrived; speaking anyway rather than staying mute."
+        )
+    else:
+        logger.info(f"Callee picked up ({phone_number}).")
+
+    instructions = SYSTEM_PROMPT + OUTBOUND_PROMPT.format(
+        name=name or "जी",
+        medicine_name=call_info.get("medicine_name", ""),
+        dosage=call_info.get("dosage") or "as prescribed",
+        schedule_time=call_info.get("schedule_time", ""),
+        language=language,
+    )
+
+    session = build_session(
+        ctx,
+        userdata={
+            "phone_number": phone_number,
+            "ip_address": "",
+            "location": "",
+            "reminder_id": reminder_id,
+            "call_type": "medication_reminder",
+        },
+    )
+
+    # Did the callee ever actually speak? A SIP-answered line with total silence
+    # is voicemail; there is no other way to tell without answering-machine
+    # detection. Any transcript at all means a human engaged.
+    caller_spoke = False
+
+    @session.on("user_input_transcribed")
+    def _on_user_transcript(event) -> None:
+        nonlocal caller_spoke
+        if getattr(event, "transcript", "").strip():
+            caller_spoke = True
+
+    answered_at = time.monotonic()
+
+    # Registered BEFORE we start speaking. A callee who hangs up during the
+    # opening still trips this; registering after the opening would miss that
+    # event and leave the job waiting forever on a dead room.
+    disconnected = asyncio.Event()
+
+    @ctx.room.on("participant_disconnected")
+    def _on_disconnect(p: rtc.RemoteParticipant) -> None:
+        if p.identity == phone_number:
+            disconnected.set()
+
+    @session.on("close")
+    def _on_session_close(_event) -> None:
+        disconnected.set()
+
+    await session.start(
+        agent=Assistant(instructions=instructions),
+        room=ctx.room,
+        room_options=room_io.RoomOptions(
+            audio_input=room_io.AudioInputOptions(
+                noise_cancellation=lambda params: (
+                    noise_cancellation.BVCTelephony()
+                    if params.participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
+                    else noise_cancellation.BVC()
+                ),
+            ),
+        ),
+    )
+
+    # Speak the opening ourselves instead of letting the LLM improvise it: Day 6
+    # requires who/why/how-to-stop in the first two sentences, and that promise
+    # is too important to leave to sampling.
+    opening = build_outbound_opening(call_info)
+    logger.info(f"Outbound opening: {opening}")
+    try:
+        await session.say(opening)
+    except Exception as e:
+        logger.warning(f"Opening was cut short (callee likely hung up): {e}")
+        disconnected.set()
+
+    # Hold the job open until the callee hangs up or end_call closes the session.
+    # The cap is a backstop against a wedged SIP leg holding a trunk channel and
+    # burning trial credit forever.
+    try:
+        await asyncio.wait_for(disconnected.wait(), timeout=MAX_OUTBOUND_CALL_SEC)
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"Outbound call hit the {MAX_OUTBOUND_CALL_SEC}s cap; closing it."
+        )
+        await session.aclose()
+
+    duration = time.monotonic() - answered_at
+
+    if reminder_id:
+        reminder = reminders.get_reminder(reminder_id)
+        if reminder and reminder["opted_out"]:
+            # The opt_out tool already fired mid-call; do not overwrite that with
+            # an 'answered', or the row would look eligible for calling again.
+            outcome = reminders.OUTCOME_OPTED_OUT
+        elif not caller_spoke:
+            outcome = reminders.OUTCOME_POSSIBLE_VOICEMAIL
+        else:
+            # record_attempt downgrades this to quick_hangup under 5s on its own.
+            outcome = reminders.OUTCOME_ANSWERED
+
+        reminders.record_attempt(
+            reminder_id,
+            outcome,
+            sip_status="200",
+            duration_sec=round(duration, 1),
+            detail=f"caller_spoke={caller_spoke}",
+        )
+
+    logger.info(
+        f"Outbound call finished after {duration:.1f}s "
+        f"(caller_spoke={caller_spoke}, reminder_id={reminder_id})."
+    )
+
+
+@server.rtc_session(agent_name="Aanya")
 async def my_agent(ctx: JobContext):
     db.init_db()
 
@@ -319,11 +988,39 @@ async def my_agent(ctx: JobContext):
         "room": ctx.room.name,
     }
 
+    # ------------------------------------------------------------------
+    # Day 6: job metadata is the inbound/outbound discriminator. The
+    # outbound dialer dispatches us with a reminder JSON payload; a browser
+    # or inbound SIP call arrives with no metadata at all, and that path is
+    # left exactly as it was on Day 5.
+    # ------------------------------------------------------------------
+    call_info: dict = {}
+    raw_metadata = (ctx.job.metadata or "").strip()
+    if raw_metadata:
+        try:
+            parsed = json.loads(raw_metadata)
+            if parsed.get("call_type") == "medication_reminder":
+                call_info = parsed
+        except (json.JSONDecodeError, AttributeError) as e:
+            logger.warning(f"Could not parse job metadata as reminder payload: {e}")
+
+    is_outbound = bool(call_info)
+    if is_outbound:
+        logger.info(
+            f"Outbound reminder call: reminder_id={call_info.get('reminder_id')}, "
+            f"medicine={call_info.get('medicine_name')}, "
+            f"language={call_info.get('language_preference')}"
+        )
+
     await ctx.connect()
 
     @ctx.room.on("participant_disconnected")
     def on_participant_disconnected(participant: rtc.RemoteParticipant):
         logger.info(f"Caller ended the call / disconnected: identity='{participant.identity}', name='{participant.name}'")
+
+    if is_outbound:
+        await run_outbound_reminder(ctx, call_info)
+        return
 
     # Fetch connected remote participant to get exact identity, phone, IP & name from SQLite
     phone_number = ""
@@ -333,7 +1030,7 @@ async def my_agent(ctx: JobContext):
         participant = await ctx.wait_for_participant()
         attrs = getattr(participant, "attributes", {}) or {}
         logger.info(f"Connected participant: identity='{participant.identity}', name='{participant.name}', attributes={attrs}")
-        
+
         phone_number = attrs.get("sip.phoneNumber", attrs.get("phone", participant.identity if (participant.identity and (participant.identity.startswith("+") or participant.identity.isdigit())) else ""))
         ip_address = attrs.get("client_ip", attrs.get("ip", ""))
 
@@ -344,6 +1041,9 @@ async def my_agent(ctx: JobContext):
         if not caller_record and participant.name:
             caller_record = db.get_caller_memory(participant.name)
         if not caller_record:
+            # Browser callers have no stable identity, so fall back to the most
+            # recent record. Safe here; never on outbound, where guessing the
+            # wrong person would greet them by a stranger's name.
             caller_record = db.get_latest_caller_memory()
     except Exception as e:
         logger.warning(f"Could not fetch participant on connect: {e}")
@@ -363,20 +1063,8 @@ async def my_agent(ctx: JobContext):
 
     saved_location = caller_record.get("facts", {}).get("location", "") if caller_record else ""
 
-    session = AgentSession(
-        stt=deepgram.STT(model="nova-3", language="multi"),
-        llm=google.LLM(
-            model="gemini-3.5-flash-lite",
-        ),
-        tts=murf.TTS(
-            voice="Anisha",
-            style="Conversation",
-            tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
-            text_pacing=True,
-        ),
-        turn_detection=MultilingualModel(),
-        vad=ctx.proc.userdata["vad"],
-        preemptive_generation=True,
+    session = build_session(
+        ctx,
         userdata={"phone_number": phone_number, "ip_address": ip_address, "location": saved_location},
     )
 
@@ -385,7 +1073,7 @@ async def my_agent(ctx: JobContext):
         lang = caller_record.get("language_preference", "Hindi")
         facts = caller_record.get("facts", {})
         ongoing = facts.get("ongoing_conditions", "")
-        
+
         if lang == "English":
             if ongoing:
                 greeting_msg = (

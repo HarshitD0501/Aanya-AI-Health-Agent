@@ -41,6 +41,63 @@ def ensure_db_schema(conn: sqlite3.Connection) -> None:
     if "ip_address" not in columns:
         conn.execute("ALTER TABLE caller_memory ADD COLUMN ip_address TEXT DEFAULT ''")
 
+    # ---------------------------------------------------------------------
+    # Day 6 — Outbound medication reminder calls
+    # ---------------------------------------------------------------------
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS medication_reminders (
+            reminder_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            phone_number TEXT NOT NULL,
+            medicine_name TEXT NOT NULL,
+            dosage TEXT DEFAULT '',
+            schedule_time TEXT NOT NULL,
+            language_preference TEXT DEFAULT 'Hindi',
+            active INTEGER DEFAULT 1,
+            opted_out INTEGER DEFAULT 0,
+            attempt_count INTEGER DEFAULT 0,
+            last_outcome TEXT DEFAULT '',
+            last_called_at TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS call_attempts (
+            attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reminder_id INTEGER NOT NULL,
+            phone_number TEXT DEFAULT '',
+            outcome TEXT NOT NULL,
+            sip_status TEXT DEFAULT '',
+            duration_sec REAL DEFAULT 0,
+            detail TEXT DEFAULT '',
+            attempted_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_reminder_due ON medication_reminders (active, opted_out, schedule_time)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attempts_reminder ON call_attempts (reminder_id, attempted_at)"
+    )
+
+    # Adherence columns were added after the first reminders shipped, so migrate
+    # rather than relying on CREATE TABLE IF NOT EXISTS (which is a no-op here).
+    cursor.execute("PRAGMA table_info(medication_reminders)")
+    reminder_columns = [column[1] for column in cursor.fetchall()]
+    if "last_medicine_response" not in reminder_columns:
+        conn.execute(
+            "ALTER TABLE medication_reminders ADD COLUMN last_medicine_response TEXT DEFAULT ''"
+        )
+    if "last_response_at" not in reminder_columns:
+        conn.execute(
+            "ALTER TABLE medication_reminders ADD COLUMN last_response_at TEXT DEFAULT ''"
+        )
+
 
 def init_db(db_path: Optional[Path] = None) -> None:
     """Initialize the SQLite table for storing caller memory with phone and IP address support."""

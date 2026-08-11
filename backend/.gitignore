@@ -11,6 +11,10 @@ KMS
 .pytest_cache
 .ruff_cache
 
+# Day 6 — the real trunk config holds the SIP credential-list password
+outbound-trunk.json
+!outbound-trunk.example.json
+
 # Claude Code
 .claude/settings.local.json
 .claude/worktrees/
