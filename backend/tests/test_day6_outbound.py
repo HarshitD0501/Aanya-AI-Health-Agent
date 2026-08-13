@@ -7,6 +7,8 @@ No Twilio trunk and no LiveKit connection are required: dial-time failures are
 simulated by feeding classify_dial_error the exception text LiveKit produces.
 """
 
+import asyncio
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -711,3 +713,714 @@ async def test_listing_reminders_uses_the_number_from_the_live_call(agent_db):
 
     empty = await assistant.list_my_reminders(_tool_context(phone_number="+911111111111"))
     assert "No active reminders" in empty
+
+
+# ---------------------------------------------------------------------------
+# Answer detection: do not speak to a ringing phone
+#
+# The regression these cover: Aanya used to treat a published audio track as
+# "answered". LiveKit publishes the SIP leg's track while sip.callStatus is still
+# 'dialing', so the whole Hindi opening played into a ringing line and the callee
+# picked up to total silence. sip.callStatus == 'active' is the only answer.
+# ---------------------------------------------------------------------------
+
+
+class _FakePublication:
+    """A published audio track - present during the ring, so never proof of pickup."""
+
+    def __init__(self) -> None:
+        from livekit import rtc
+
+        self.kind = rtc.TrackKind.KIND_AUDIO
+
+
+class _FakeSipParticipant:
+    def __init__(self, call_status: str = "dialing", with_audio: bool = True) -> None:
+        self.identity = "+919999999999"
+        self.name = "Ramesh"
+        self.attributes = {"sip.callStatus": call_status} if call_status else {}
+        self.track_publications = {"TR_1": _FakePublication()} if with_audio else {}
+
+    def set_status(self, status: str) -> None:
+        self.attributes["sip.callStatus"] = status
+
+
+class _FakeRoom:
+    """Just enough rtc.Room for _wait_until_sip_answered: handlers plus lookup."""
+
+    def __init__(self, participant: _FakeSipParticipant) -> None:
+        self.name = "reminder-test"
+        self.metadata = ""
+        self.remote_participants = {participant.identity: participant}
+        self._handlers: dict[str, list] = {}
+
+    def on(self, event: str, callback=None):
+        if callback is None:
+            def decorator(fn):
+                self._handlers.setdefault(event, []).append(fn)
+                return fn
+
+            return decorator
+        self._handlers.setdefault(event, []).append(callback)
+        return callback
+
+    def off(self, event: str, callback) -> None:
+        handlers = self._handlers.get(event, [])
+        if callback in handlers:
+            handlers.remove(callback)
+
+    def emit(self, event: str, *args) -> None:
+        for handler in list(self._handlers.get(event, [])):
+            handler(*args)
+
+    def set_metadata(self, metadata: str, emit: bool = True) -> None:
+        """Mirror rtc.Room: the property updates, then the event fires."""
+        old, self.metadata = self.metadata, metadata
+        if emit:
+            self.emit("room_metadata_changed", old, metadata)
+
+    def handler_count(self) -> int:
+        return sum(len(handlers) for handlers in self._handlers.values())
+
+
+def _fake_ctx(participant: _FakeSipParticipant):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(room=_FakeRoom(participant))
+
+
+async def test_a_ringing_phone_with_an_audio_track_is_not_answered():
+    """The exact regression: track published, status still 'dialing' -> not answered."""
+    from agent import _wait_until_sip_answered
+
+    participant = _FakeSipParticipant(call_status="dialing", with_audio=True)
+    ctx = _fake_ctx(participant)
+
+    state = await _wait_until_sip_answered(ctx, participant, timeout=1.0)
+
+    assert state == "timeout", "a track published during the ring must not count as pickup"
+
+
+async def test_pickup_mid_ring_is_detected_from_the_status_event():
+    from agent import _wait_until_sip_answered
+
+    participant = _FakeSipParticipant(call_status="dialing")
+    ctx = _fake_ctx(participant)
+
+    async def pick_up_after_a_moment():
+        await asyncio.sleep(0.2)
+        participant.set_status("active")
+        ctx.room.emit(
+            "participant_attributes_changed", {"sip.callStatus": "active"}, participant
+        )
+
+    _, state = await asyncio.gather(
+        pick_up_after_a_moment(),
+        _wait_until_sip_answered(ctx, participant, timeout=3.0),
+    )
+    assert state == "active"
+
+
+async def test_pickup_is_still_detected_when_the_event_never_fires():
+    """The poll backstop: a missed attributes event must not leave Aanya mute."""
+    from agent import _wait_until_sip_answered
+
+    participant = _FakeSipParticipant(call_status="dialing")
+    ctx = _fake_ctx(participant)
+
+    async def pick_up_silently():
+        await asyncio.sleep(0.2)
+        participant.set_status("active")  # no event emitted at all
+
+    _, state = await asyncio.gather(
+        pick_up_silently(),
+        _wait_until_sip_answered(ctx, participant, timeout=3.0),
+    )
+    assert state == "active"
+
+
+async def test_already_active_returns_immediately():
+    from agent import _wait_until_sip_answered
+
+    participant = _FakeSipParticipant(call_status="active")
+    ctx = _fake_ctx(participant)
+
+    assert await _wait_until_sip_answered(ctx, participant, timeout=1.0) == "active"
+
+
+async def test_declined_while_ringing_is_a_hangup():
+    from agent import _wait_until_sip_answered
+
+    participant = _FakeSipParticipant(call_status="dialing")
+    ctx = _fake_ctx(participant)
+
+    async def decline():
+        await asyncio.sleep(0.2)
+        ctx.room.emit(
+            "participant_attributes_changed", {"sip.callStatus": "hangup"}, participant
+        )
+
+    _, state = await asyncio.gather(
+        decline(),
+        _wait_until_sip_answered(ctx, participant, timeout=3.0),
+    )
+    assert state == "hangup"
+
+
+async def test_a_missing_status_attribute_speaks_rather_than_staying_mute():
+    """No sip.callStatus ever arrives: speak anyway, do not sit silent on a live call."""
+    from agent import _wait_until_sip_answered
+
+    participant = _FakeSipParticipant(call_status="", with_audio=False)
+    ctx = _fake_ctx(participant)
+
+    assert await _wait_until_sip_answered(ctx, participant, timeout=1.0) == "unknown"
+
+
+async def test_handlers_are_removed_when_the_wait_ends():
+    """A leaked handler would fire against a finished call on the next attempt."""
+    from agent import _wait_until_sip_answered
+
+    participant = _FakeSipParticipant(call_status="dialing")
+    ctx = _fake_ctx(participant)
+
+    await _wait_until_sip_answered(ctx, participant, timeout=1.0)
+
+    assert ctx.room.handler_count() == 0
+
+
+# ---------------------------------------------------------------------------
+# The dialer's answer relay
+#
+# The second, harder bug: on this project's Twilio trunk sip.callStatus NEVER
+# leaves 'dialing', even on a call the callee physically answered and talked on.
+# Proven with src/sip_probe.py running with no agent in the room at all. So the
+# dialer - which holds the synchronous dial, and therefore sees the carrier's SIP
+# 200 OK - relays the answer to the agent through room metadata.
+# ---------------------------------------------------------------------------
+
+
+async def test_metadata_answer_unblocks_a_trunk_that_never_reports_active():
+    """The real-world case: status stuck on 'dialing', dialer says answered."""
+    from agent import _wait_until_sip_answered
+
+    participant = _FakeSipParticipant(call_status="dialing")
+    ctx = _fake_ctx(participant)
+
+    async def dialer_reports_the_answer():
+        await asyncio.sleep(0.2)
+        # Exactly what outbound._announce_answer writes.
+        ctx.room.set_metadata(json.dumps({"sip_answered": True, "answered_at": 1.0}))
+
+    _, state = await asyncio.gather(
+        dialer_reports_the_answer(),
+        _wait_until_sip_answered(ctx, participant, timeout=3.0),
+    )
+    assert state == "active", "the dialer's 200 OK must be enough to start speaking"
+
+
+async def test_metadata_answer_is_seen_even_if_the_event_is_missed():
+    """Poll backstop covers the metadata channel too, not just the attribute."""
+    from agent import _wait_until_sip_answered
+
+    participant = _FakeSipParticipant(call_status="dialing")
+    ctx = _fake_ctx(participant)
+
+    async def dialer_reports_silently():
+        await asyncio.sleep(0.2)
+        ctx.room.set_metadata(json.dumps({"sip_answered": True}), emit=False)
+
+    _, state = await asyncio.gather(
+        dialer_reports_silently(),
+        _wait_until_sip_answered(ctx, participant, timeout=3.0),
+    )
+    assert state == "active"
+
+
+async def test_answer_already_in_metadata_returns_immediately():
+    """The dialer can win the race - the answer may land before we start waiting."""
+    from agent import _wait_until_sip_answered
+
+    participant = _FakeSipParticipant(call_status="dialing")
+    ctx = _fake_ctx(participant)
+    ctx.room.metadata = json.dumps({"sip_answered": True})
+
+    assert await _wait_until_sip_answered(ctx, participant, timeout=1.0) == "active"
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "",
+        "not json at all",
+        json.dumps({"sip_answered": False}),
+        json.dumps({"something_else": True}),
+        json.dumps(["a", "list"]),
+    ],
+)
+async def test_junk_metadata_is_not_an_answer(metadata):
+    """Room metadata is shared state; only our own key, set to true, counts."""
+    from agent import _wait_until_sip_answered
+
+    participant = _FakeSipParticipant(call_status="dialing")
+    ctx = _fake_ctx(participant)
+    ctx.room.metadata = metadata
+
+    assert await _wait_until_sip_answered(ctx, participant, timeout=0.8) == "timeout"
+
+
+def test_the_two_sides_agree_on_the_metadata_key():
+    """Two processes, one contract. A rename on one side would mute every call."""
+    import agent
+    import outbound
+
+    assert agent.SIP_ANSWERED_METADATA_KEY == outbound.ANSWERED_METADATA_KEY
+
+
+def test_the_teardown_threshold_sits_between_the_ring_and_the_wait():
+    """The last-resort branch must be reachable, and never during the ring.
+
+    Below the dialer's ring timeout it would fire on a phone still ringing; above
+    the agent's own wait it could never fire at all.
+    """
+    import agent
+    import outbound
+
+    assert outbound.RINGING_TIMEOUT_SEC < agent.SIP_RING_TEARDOWN_SEC
+    assert agent.SIP_RING_TEARDOWN_SEC < agent.SIP_ANSWER_TIMEOUT_SEC
+
+
+async def test_a_leg_still_connected_past_any_ring_is_spoken_to(monkeypatch):
+    """Belt and braces: both signals lost, but the line is demonstrably still up.
+
+    A ring cannot outlive the dialer's teardown, so a leg still present past it is
+    a live call. Speaking is right; sitting mute in a live caller's ear is not.
+    """
+    import agent
+
+    monkeypatch.setattr(agent, "SIP_RING_TEARDOWN_SEC", 0.5)
+    participant = _FakeSipParticipant(call_status="dialing")
+    ctx = _fake_ctx(participant)
+
+    state = await agent._wait_until_sip_answered(ctx, participant, timeout=0.8)
+
+    assert state == "active"
+
+
+async def test_a_leg_that_left_is_still_a_no_answer(monkeypatch):
+    """The same branch must not fire for a call that actually ended."""
+    import agent
+
+    monkeypatch.setattr(agent, "SIP_RING_TEARDOWN_SEC", 0.5)
+    participant = _FakeSipParticipant(call_status="dialing")
+    ctx = _fake_ctx(participant)
+    ctx.room.remote_participants.clear()  # carrier tore the call down
+
+    state = await agent._wait_until_sip_answered(ctx, participant, timeout=0.8)
+
+    assert state == "timeout"
+
+
+# ---------------------------------------------------------------------------
+# Transport hiccup vs carrier rejection
+#
+# wait_until_answered=True holds one HTTP request open for the whole ring, which
+# is why it was abandoned: Windows aborts it with WinError 1236 mid-ring and the
+# old code called that a trunk failure on a phone that was ringing normally. The
+# dial is now allowed to die without ending the call - but only for genuine
+# transport errors, never for a carrier's "no".
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError("[WinError 1236] The network connection was aborted by the local system"),
+        ConnectionResetError("connection reset by peer"),
+        asyncio.TimeoutError(),
+        Exception("Server disconnected"),
+        Exception("Cannot connect to host cloud.livekit.io"),
+    ],
+)
+def test_transport_hiccups_do_not_end_a_ringing_call(error):
+    from outbound import is_transport_hiccup
+
+    assert is_transport_hiccup(error) is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        Exception("twirp error internal: sip status 486 Busy Here"),
+        Exception("sip status 603 Decline"),
+        Exception("twirp error unauthenticated: invalid api key"),
+    ],
+)
+def test_carrier_answers_are_never_treated_as_hiccups(error):
+    """A 486 means the callee declined. Retrying the poll would ring a dead call."""
+    from outbound import is_transport_hiccup
+
+    assert is_transport_hiccup(error) is False
+
+
+def test_a_dropped_connection_carrying_a_sip_code_is_still_a_rejection():
+    """Both markers present: the SIP code wins, because it is the call's verdict."""
+    from outbound import is_transport_hiccup
+
+    error = Exception("connection reset after sip status 486 Busy Here")
+    assert is_transport_hiccup(error) is False
+
+
+def test_the_dial_timeout_outlives_the_ring():
+    """A transport timeout shorter than the ring would abort every long ring."""
+    import outbound
+
+    assert outbound.DIAL_HTTP_TIMEOUT_SEC > outbound.RINGING_TIMEOUT_SEC
+
+
+# ---------------------------------------------------------------------------
+# Racing the two answer signals
+#
+# _dial_and_wait_for_answer runs the synchronous dial and the attribute poll at
+# the same time and takes whichever fires. These drive it with fakes so every
+# branch is exercised without a trunk.
+# ---------------------------------------------------------------------------
+
+
+class _FakeSipApi:
+    """A create_sip_participant that answers after a delay, or raises."""
+
+    def __init__(self, answer_after: float = 0.0, error: Exception = None) -> None:
+        self.answer_after = answer_after
+        self.error = error
+        self.request = None
+
+    async def create_sip_participant(self, request, timeout=None):
+        self.request = request
+        self.timeout = timeout
+        await asyncio.sleep(self.answer_after)
+        if self.error:
+            raise self.error
+        from types import SimpleNamespace
+
+        return SimpleNamespace(participant_identity=request.participant_identity)
+
+
+def _fake_lkapi(sip: _FakeSipApi):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(sip=sip, room=SimpleNamespace())
+
+
+def _dial_request():
+    from livekit import api
+
+    return api.CreateSIPParticipantRequest(
+        sip_trunk_id="ST_test",
+        sip_call_to="+919999999999",
+        room_name="reminder-test",
+        participant_identity="+919999999999",
+        participant_name="Ramesh",
+    )
+
+
+def _stub_poll(monkeypatch, state: str, sip_status: str = "", after: float = 0.05):
+    """Replace the attribute poll with a fixed verdict after a delay."""
+    import outbound
+
+    async def fake_poll(lkapi, room_name, identity, timeout=None):
+        await asyncio.sleep(after)
+        return state, sip_status
+
+    monkeypatch.setattr(outbound, "_poll_room_for_answer", fake_poll)
+
+
+async def test_the_dial_wins_when_the_attribute_never_reports_active(monkeypatch):
+    """The production case: poll times out, the synchronous dial gets the answer."""
+    import outbound
+
+    _stub_poll(monkeypatch, "timeout", after=0.05)
+    sip = _FakeSipApi(answer_after=2.2)  # past MIN_PLAUSIBLE_ANSWER_SEC
+
+    state, sip_status, participant, error = await outbound._dial_and_wait_for_answer(
+        _fake_lkapi(sip), _dial_request(), "reminder-test", "+919999999999"
+    )
+
+    assert state == "answered"
+    assert sip_status == "200"
+    assert participant is not None
+    assert error is None
+    assert sip.request.wait_until_answered is True, "the answer gate must be requested"
+
+
+async def test_an_instant_dial_return_is_not_treated_as_a_pickup(monkeypatch):
+    """If wait_until_answered is ignored, the dial returns at once. Do not speak.
+
+    Without this guard the whole fix would reintroduce the original bug in a new
+    place: announcing an answer while the phone is still ringing.
+    """
+    import outbound
+
+    _stub_poll(monkeypatch, "timeout", after=0.3)
+    sip = _FakeSipApi(answer_after=0.0)
+
+    state, _, _, _ = await outbound._dial_and_wait_for_answer(
+        _fake_lkapi(sip), _dial_request(), "reminder-test", "+919999999999"
+    )
+
+    assert state == "timeout", "an instant return means 'dial accepted', not 'answered'"
+
+
+async def test_the_poll_wins_when_the_attribute_does_report_active(monkeypatch):
+    """A well-behaved trunk still works: whichever signal fires first is used."""
+    import outbound
+
+    _stub_poll(monkeypatch, "answered", sip_status="200", after=0.05)
+    sip = _FakeSipApi(answer_after=10.0)  # would outlast the test
+
+    state, sip_status, _, _ = await outbound._dial_and_wait_for_answer(
+        _fake_lkapi(sip), _dial_request(), "reminder-test", "+919999999999"
+    )
+
+    assert (state, sip_status) == ("answered", "200")
+
+
+async def test_a_carrier_rejection_ends_the_call_immediately(monkeypatch):
+    """486 means declined. Polling on would waste 30s on a call that is over."""
+    import outbound
+
+    _stub_poll(monkeypatch, "timeout", after=10.0)
+    sip = _FakeSipApi(error=Exception("twirp error: sip status 486 Busy Here"))
+
+    state, _, _, error = await outbound._dial_and_wait_for_answer(
+        _fake_lkapi(sip), _dial_request(), "reminder-test", "+919999999999"
+    )
+
+    assert state == "dial_failed"
+    assert "486" in str(error)
+
+
+async def test_a_dropped_dial_lets_the_poll_finish_the_call(monkeypatch):
+    """WinError 1236 mid-ring: the phone is still ringing, so keep watching."""
+    import outbound
+
+    _stub_poll(monkeypatch, "answered", sip_status="200", after=0.3)
+    sip = _FakeSipApi(
+        answer_after=0.05,
+        error=OSError("[WinError 1236] The network connection was aborted"),
+    )
+
+    state, sip_status, _, _ = await outbound._dial_and_wait_for_answer(
+        _fake_lkapi(sip), _dial_request(), "reminder-test", "+919999999999"
+    )
+
+    assert state == "answered", "a dead HTTP request must not abort a ringing call"
+    assert sip_status == "200"
+
+
+async def test_a_decline_seen_by_the_poll_is_reported_as_a_hangup(monkeypatch):
+    import outbound
+
+    _stub_poll(monkeypatch, "hangup", sip_status="486", after=0.05)
+    sip = _FakeSipApi(answer_after=10.0)
+
+    state, sip_status, _, _ = await outbound._dial_and_wait_for_answer(
+        _fake_lkapi(sip), _dial_request(), "reminder-test", "+919999999999"
+    )
+
+    assert (state, sip_status) == ("hangup", "486")
+
+
+# ---------------------------------------------------------------------------
+# Speaking early
+#
+# The failure these lock down was heard on a real call: the callee picked up and
+# got 46 seconds of silence. Both answer signals are dead on this trunk, so the
+# 45s gate always ran to its timeout, and the timeout was treated as "never
+# answered" - Aanya shut the job down or spoke far too late to matter. Now the
+# gate is a few seconds long, only a hangup silences her, and an unconfirmed
+# answer gets the opening repeated.
+# ---------------------------------------------------------------------------
+
+
+class _FakeSession:
+    """Records what was said. say() returns an awaitable, like SpeechHandle."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.spoken: list[str] = []
+        self.in_chat_ctx: list[bool] = []
+        self.error = error
+
+    def say(self, text: str, *, add_to_chat_ctx: bool = True):
+        self.spoken.append(text)
+        self.in_chat_ctx.append(add_to_chat_ctx)
+        if self.error:
+            raise self.error
+
+        async def _played_out():
+            return None
+
+        return _played_out()
+
+
+def test_the_speak_early_gate_is_short_enough_that_nobody_hangs_up():
+    """A few seconds of dead air is forgivable; the old 45s was not."""
+    import agent
+
+    assert agent.SIP_SPEAK_EARLY_SEC <= 5.0
+    assert agent.SIP_SPEAK_EARLY_SEC < agent.SIP_ANSWER_TIMEOUT_SEC
+
+
+def test_the_opening_is_repeated_a_bounded_number_of_times():
+    """Unbounded repeats would read a voicemail box the same paragraph forever."""
+    import agent
+
+    assert 1 < agent.OUTBOUND_OPENING_ATTEMPTS <= 4
+    assert agent.OUTBOUND_OPENING_RETRY_SEC > 0
+    # Every attempt plus its gap has to fit inside the call cap.
+    assert (
+        agent.OUTBOUND_OPENING_ATTEMPTS * agent.OUTBOUND_OPENING_RETRY_SEC
+        < agent.MAX_OUTBOUND_CALL_SEC
+    )
+
+
+async def test_a_confirmed_answer_says_the_opening_exactly_once():
+    """The callee is demonstrably listening; repeating would talk over them."""
+    import agent
+
+    session = _FakeSession()
+    await agent._deliver_opening(
+        session,
+        "नमस्ते",
+        answer_confirmed=True,
+        engaged=asyncio.Event(),
+        disconnected=asyncio.Event(),
+    )
+
+    assert session.spoken == ["नमस्ते"]
+
+
+async def test_an_unconfirmed_answer_repeats_the_opening(monkeypatch):
+    """No answer signal: we may have spoken into the ring, so say it again."""
+    import agent
+
+    monkeypatch.setattr(agent, "OUTBOUND_OPENING_RETRY_SEC", 0.05)
+    session = _FakeSession()
+
+    await agent._deliver_opening(
+        session,
+        "नमस्ते",
+        answer_confirmed=False,
+        engaged=asyncio.Event(),
+        disconnected=asyncio.Event(),
+    )
+
+    assert len(session.spoken) == agent.OUTBOUND_OPENING_ATTEMPTS
+
+
+async def test_only_the_first_opening_enters_the_chat_history(monkeypatch):
+    """A repeat is us covering for a lost signal, not Aanya choosing to repeat.
+
+    Three identical assistant turns in the history would teach the LLM that
+    repeating itself is the house style for the rest of the call.
+    """
+    import agent
+
+    monkeypatch.setattr(agent, "OUTBOUND_OPENING_RETRY_SEC", 0.05)
+    session = _FakeSession()
+
+    await agent._deliver_opening(
+        session,
+        "नमस्ते",
+        answer_confirmed=False,
+        engaged=asyncio.Event(),
+        disconnected=asyncio.Event(),
+    )
+
+    assert session.in_chat_ctx[0] is True
+    assert all(flag is False for flag in session.in_chat_ctx[1:])
+
+
+async def test_the_callee_speaking_stops_the_repeats(monkeypatch):
+    """One word from the callee proves they heard it. Stop, and let them talk."""
+    import agent
+
+    monkeypatch.setattr(agent, "OUTBOUND_OPENING_RETRY_SEC", 5.0)
+    session = _FakeSession()
+    engaged = asyncio.Event()
+
+    async def callee_answers():
+        await asyncio.sleep(0.05)
+        engaged.set()
+
+    await asyncio.gather(
+        callee_answers(),
+        agent._deliver_opening(
+            session,
+            "नमस्ते",
+            answer_confirmed=False,
+            engaged=engaged,
+            disconnected=asyncio.Event(),
+        ),
+    )
+
+    assert len(session.spoken) == 1, "a repeat would have talked over the callee"
+
+
+async def test_a_hangup_stops_the_repeats(monkeypatch):
+    import agent
+
+    monkeypatch.setattr(agent, "OUTBOUND_OPENING_RETRY_SEC", 5.0)
+    session = _FakeSession()
+    disconnected = asyncio.Event()
+
+    async def callee_hangs_up():
+        await asyncio.sleep(0.05)
+        disconnected.set()
+
+    await asyncio.gather(
+        callee_hangs_up(),
+        agent._deliver_opening(
+            session,
+            "नमस्ते",
+            answer_confirmed=False,
+            engaged=asyncio.Event(),
+            disconnected=disconnected,
+        ),
+    )
+
+    assert len(session.spoken) == 1
+
+
+async def test_a_failed_say_reports_the_hangup_instead_of_raising():
+    """say() blows up when the leg is gone; the caller must learn it, not crash."""
+    import agent
+
+    session = _FakeSession(error=RuntimeError("session closed"))
+    disconnected = asyncio.Event()
+
+    await agent._deliver_opening(
+        session,
+        "नमस्ते",
+        answer_confirmed=False,
+        engaged=asyncio.Event(),
+        disconnected=disconnected,
+    )
+
+    assert disconnected.is_set()
+    assert len(session.spoken) == 1, "a dead session must not be retried"
+
+
+async def test_wait_for_any_returns_false_on_timeout():
+    from agent import _wait_for_any
+
+    assert await _wait_for_any((asyncio.Event(), asyncio.Event()), 0.05) is False
+
+
+async def test_wait_for_any_sees_an_event_already_set():
+    from agent import _wait_for_any
+
+    already = asyncio.Event()
+    already.set()
+
+    assert await _wait_for_any((already, asyncio.Event()), 5.0) is True

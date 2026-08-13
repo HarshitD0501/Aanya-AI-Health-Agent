@@ -199,6 +199,8 @@ uv run pytest tests/test_day6_outbound.py -q
 | Problem | Kya karna hai |
 |---|---|
 | Call connect hui par Aanya chup | Worker `registered worker` print hone se pehle dial kiya tha. ~50s ruko, dubara dial karo. |
+| Call uthai, phir bhi 3-4 second silence | Normal hai. Aanya ab pickup signal ke liye sirf 3 second rukti hai, phir bol deti hai. Pehle 45s rukti thi — is trunk pe wo signal kabhi aata hi nahi, isliye caller ko 46 second ka silence milta tha. |
+| Opening do-teen baar sunai di | Jaan-boojh kar. Jab trunk pickup confirm nahi karta, Aanya opening 7 second baad dohra deti hai (max 3 baar) — taaki ring ke doran boli gayi baat miss na ho jaaye. Tum ek shabd bolte ho, repeat turant band. |
 | Take 3 ke baad koi call nahi ja rahi | Wahi to point hai. Naya reminder register karo (Section 0) — `reminder_id` 2 milega. |
 | Phone hi nahi bajta | Twilio trial sirf **Verified Caller IDs** ko dial karta hai. Number `Phone Numbers → Verified Caller IDs` mein hona chahiye. |
 | Time galat boli ja rahi hai | `_spoken_time()` clock ko shabdon mein badalta hai — Murf "20:00" ko "twenty colon zero zero" padhta hai. |

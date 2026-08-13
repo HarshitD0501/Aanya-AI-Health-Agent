@@ -1,10 +1,10 @@
 {
   "trunk": {
     "name": "Aanya",
-    "address": "aanya-outbound.pstn.twilio.com",
-    "numbers": ["+17432245805"],
-    "auth_username": "Harshit0501",
-    "auth_password": "Harshit@123!@#$",
+    "address": "your-trunk-name.pstn.twilio.com",
+    "numbers": ["+919454535137"],
+    "auth_username": "harshit05011",
+    "auth_password": "Harshit@123",
     "destination_country": "in"
   }
 }

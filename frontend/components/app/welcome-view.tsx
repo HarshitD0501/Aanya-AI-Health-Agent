@@ -2,15 +2,24 @@
 
 import type { SVGProps } from 'react';
 import { useCallback, useState } from 'react';
+import Link from 'next/link';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import Magnet from '@/components/Magnet';
 import SpotlightCard from '@/components/SpotlightCard';
+import { BrandMark } from '@/components/app/brand-mark';
 import { cn } from '@/lib/shadcn/utils';
 
+// `route: true` means a real page, so it gets next/link: Next prefetches it and
+// swaps it in client-side. A plain <a> made "Analytics" and "Help Desk" a full
+// document load, which in dev also waits on that route compiling - the pause
+// that felt like the button was doing nothing. Hash targets stay plain anchors;
+// Link on a same-page hash just adds overhead.
 const NAV_ITEMS = [
-  { label: 'Home', href: '#home' },
-  { label: 'About', href: '#about' },
-  { label: 'FAQ', href: '#faq' },
+  { label: 'Home', href: '#home', route: false },
+  { label: 'Analytics 📊', href: '/analytics', route: true },
+  { label: 'Help Desk 🆘', href: '/help-desk', route: true },
+  { label: 'About', href: '#about', route: false },
+  { label: 'FAQ', href: '#faq', route: false },
 ] as const;
 
 const HERO_SUPPORT_WORDS = ['Here', 'to', 'listen,', 'guide,', 'and', 'support.'] as const;
@@ -76,28 +85,6 @@ const FAQS = [
       'Aanya uses Murf Falcon for expressive, low-latency voice output and LiveKit for the real-time conversation experience.',
   },
 ] as const;
-
-function BrandMark({ className }: { className?: string }) {
-  return (
-    <span
-      className={cn(
-        'aanya-brand-mark inline-grid size-10 shrink-0 place-items-center rounded-[14px]',
-        className
-      )}
-      aria-hidden="true"
-    >
-      <svg viewBox="0 0 32 32" className="size-6" fill="none">
-        <path
-          d="M7 17.25h3.2l2.05-6.5 3.45 11.5 2.55-8 1.5 3h5.25"
-          stroke="currentColor"
-          strokeWidth="2.25"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    </span>
-  );
-}
 
 function ArrowIcon(props: SVGProps<SVGSVGElement>) {
   return (
@@ -295,15 +282,19 @@ export const WelcomeView = ({
           </a>
 
           <nav aria-label="Primary navigation" className="hidden items-center gap-9 md:flex">
-            {NAV_ITEMS.map((item) => (
-              <a
-                key={item.href}
-                href={item.href}
-                className="rounded-md text-sm font-medium text-slate-600 transition-colors hover:text-[#111a2e] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-violet-600"
-              >
-                {item.label}
-              </a>
-            ))}
+            {NAV_ITEMS.map((item) => {
+              const className =
+                'rounded-md text-sm font-medium text-slate-600 transition-colors hover:text-[#111a2e] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-violet-600';
+              return item.route ? (
+                <Link key={item.href} href={item.href} prefetch className={className}>
+                  {item.label}
+                </Link>
+              ) : (
+                <a key={item.href} href={item.href} className={className}>
+                  {item.label}
+                </a>
+              );
+            })}
           </nav>
 
           <div className="hidden md:block">
@@ -535,7 +526,7 @@ export const WelcomeView = ({
                 <img
                   src="/aanya-advisor.jpg"
                   alt="Aanya — AI Health Advisor"
-                  className="absolute inset-0 h-full w-full object-cover rounded-[40px]"
+                  className="absolute inset-0 h-full w-full rounded-[40px] object-cover"
                 />
 
                 <div className="absolute right-5 bottom-5 left-5 flex items-center gap-3 rounded-2xl border border-white bg-white/90 p-3.5 shadow-lg shadow-slate-950/5 backdrop-blur sm:right-7 sm:bottom-7 sm:left-7 sm:p-4">

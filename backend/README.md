@@ -301,11 +301,89 @@ Voicemail is detected without answering-machine detection: a SIP-answered line t
 
 Outcome precedence matters. If the opt-out tool fired during the call, the outcome is `opted_out` even though the call was answered — recording `answered` would leave the row looking eligible to call again.
 
+### Detecting the pickup
+
+The hardest part of Day 6 is knowing *when the callee actually answered*. Getting it wrong is silent in the logs and obvious on the phone, so it is worth stating plainly what does and does not work.
+
+`ctx.wait_for_participant()` returns while the phone is still **ringing** — LiveKit creates the SIP participant the moment the dial starts. Speaking then plays the whole Hindi opening into a ringing line, and the callee picks up to dead silence.
+
+Two things that look like answer signals and are not:
+
+- **A published audio track.** LiveKit publishes the SIP leg's audio track during the ring. Verified with `src/sip_probe.py`: `tracks=1` at 1.3 seconds while `sip.callStatus` was still `dialing`.
+- **`sip.callStatus == "active"` on its own.** It is the documented signal, and on this project's Twilio Elastic SIP trunk it *never fires* — the probe watched a real, answered, spoken-on call stay `dialing` for its entire life. A gate that only trusts the attribute reports `no_answer` on every single call and Aanya never speaks at all.
+
+So the answer is established by the dialer, which holds the one signal that does work, and relayed to the agent:
+
+1. `outbound.py` dials with `wait_until_answered=True`, which returns on the carrier's SIP `200 OK`, and races that against the attribute poll. Whichever fires first wins.
+2. The moment it has an answer it writes `{"sip_answered": true}` into the **room metadata** — the one channel the agent process is already connected to.
+3. `agent.py` waits on `sip.callStatus == "active"` *or* that metadata key, then speaks.
+
+Three guards keep this from turning into a new version of the same bug:
+
+- A dial that returns in under `MIN_PLAUSIBLE_ANSWER_SEC` (2s) is treated as "dial accepted", not "answered" — no real pickup beats a ringback cycle, so a fast return means the flag was ignored.
+- A dial that dies at the HTTP layer does **not** end the call. Holding one request open for a 30-second ring lets Windows abort it with `WinError 1236` mid-ring; `is_transport_hiccup()` tells that apart from a carrier's `486`, and the poll keeps watching a phone that is still ringing.
+- If both signals are lost but the SIP leg is *still connected* past `SIP_RING_TEARDOWN_SEC` (35s, longer than any ring the dialer allows), Aanya speaks anyway. A ring cannot outlive its own teardown, so that is a live call — and sitting mute in a live caller's ear is the worst outcome available.
+
+`src/sip_probe.py` is kept for diagnosing this from scratch on a new trunk. It dials with **no agent in the room** and dumps every SIP attribute once a second, which is how the trunk's behaviour above was established rather than guessed:
+
+```bash
+uv run python src/sip_probe.py --to +919999999999
+uv run python src/sip_probe.py --to +919999999999 --wait-until-answered
+```
+
 ### Data that travels
 
 Reminder job metadata carries only what the opening needs: name, medicine, dosage, time, language, phone, reminder ID. No health facts, no triage history, no transcripts. A test asserts this, because metadata is the one field that leaves the process.
 
 Adherence is stored separately from the dial outcome — a delivered call where the person says "I forgot" still succeeded as a call. `confirm_medicine_taken` writes `taken` / `not_taken` plus an optional note to `last_medicine_response`.
+
+## Day 7 — Asking a human for help (escalation)
+
+Aanya has exactly two honest limits. When she hits one, she stops, asks permission, and files a request a real person can act on instead of guessing.
+
+| Trigger              | `reason_code`        | Example                                                               |
+| -------------------- | -------------------- | --------------------------------------------------------------------- |
+| Red-flag symptom     | `red_flag_symptom`   | "सीने में तेज़ दर्द और साँस लेने में तकलीफ" — chest pain, stroke signs, bleeding |
+| Out of her scope     | `diagnosis_request`  | "मुझे कौन सी दवा लेनी चाहिए?", "यह रिपोर्ट पढ़कर बताओ मुझे क्या बीमारी है"      |
+
+Everything else — sleep, diet, stress, mild headaches, first aid, hospital lookup, reminders, small talk — she answers herself. Escalating those would bury the human queue, so the prompt names them as never-escalate and a test asserts a sleep question files nothing.
+
+**Order of events for a red flag never changes:** the 108 / nearest-hospital line is spoken **first**, then the human handover is offered. Consent must never delay emergency advice.
+
+**Consent gate.** `create_escalation` refuses unless the caller explicitly agreed, and the refusal names exactly what would have been shared — name, what they described, the advice already given, urgency, language, callback number. On a "no", nothing is saved and nothing is sent; the guard lives in both `agent.py` and `escalations.py` so no future caller can bypass it.
+
+**Reference ID.** Each request gets `HLP-1001`, `HLP-1002`, … short enough to read out digit by digit (`_spoken_reference` spells it as "एच एल पी एक शून्य शून्य एक", because Murf otherwise reads `HLP-1001` as "one thousand one").
+
+**Where it goes.** The SQLite row is the source of truth; the webhook is a notification on top of it:
+
+```
+create_escalation  →  escalations table (row + reference ID)
+                   →  Discord/Slack webhook   (delivery_status: delivered | failed)
+                   →  /help-desk dashboard    (delivery_status: saved_only if no webhook)
+```
+
+A dead webhook can therefore never lose a request — `delivery_status` records what happened and the row still shows up on the dashboard. Set `ESCALATION_WEBHOOK_URL` in `.env.local` to a Discord webhook (see `.env.example` for the four clicks); a `hooks.slack.com` URL switches the payload to Slack's format with no code change. The URL is a credential: only its host is ever logged.
+
+**What is sent.** Six fields, nothing else: who needs help (name + number), what happened, what Aanya already did, how urgent, language + preferred follow-up, reference. No transcript and no saved health history. Summaries go through `scrub_private_details`, which redacts OTPs, PINs, passwords, Aadhaar / account / card numbers and any run of six or more digits, then caps the text at 400 characters — clinically useful short numbers like `102` or `108` survive on purpose.
+
+### The dashboard
+
+```bash
+cd frontend
+pnpm dev     # http://localhost:3000/help-desk?token=<HELPDESK_TOKEN>
+```
+
+`frontend/lib/escalations.ts` opens the agent's `health_memory.db` **read-only**, so the page can never lock the writer the voice agent depends on. Point `ESCALATION_DB_PATH` elsewhere if your database moves.
+
+⚠️ These rows contain health complaints and phone numbers. Set `HELPDESK_TOKEN` in `frontend/.env.local` and the page only opens at `/help-desk?token=…` (compared in constant time). Leave it blank and the page is readable by anyone who can reach the server — it prints a warning banner saying exactly that, which is acceptable on localhost and nowhere else.
+
+For the same reason, do not commit `backend/health_memory.db` once real calls have run through it.
+
+### Inspecting the queue from the CLI
+
+```bash
+uv run python -c "import escalations; print(escalations.list_escalations())"
+```
 
 ## Testing
 
@@ -321,6 +399,12 @@ The Day 6 suite in [`tests/test_day6_outbound.py`](tests/test_day6_outbound.py) 
 
 ```bash
 uv run pytest tests/test_day6_outbound.py -q
+```
+
+The Day 7 suite in [`tests/test_day7_escalation.py`](tests/test_day7_escalation.py) needs **no webhook and no network**: delivery is tested with an empty URL and with a monkeypatched `urlopen`, so both the `saved_only` path and a dead webhook are covered offline. The two judged conversation tests at the bottom (a red flag must offer a handover, a sleep question must escalate nothing) skip themselves unless `LIVEKIT_API_KEY` is set.
+
+```bash
+uv run pytest tests/test_day7_escalation.py -q
 ```
 
 To run tests in CI, you'll need to add `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` as repository secrets.
@@ -357,12 +441,14 @@ backend/
 │   ├── health_services.py # Day 5 tools — facilities, helplines
 │   ├── reminders.py        # Reminder CRUD, outcomes, retry policy, due-window logic
 │   ├── outbound.py         # Day 6 dialer — dispatch + SIP call, CLI
-│   └── scheduler.py        # Day 6 clock — finds due reminders, dials them one at a time
+│   ├── scheduler.py        # Day 6 clock — finds due reminders, dials them one at a time
+│   └── escalations.py      # Day 7 human-help store, summary scrubber, webhook delivery
 ├── tests/
-│   ├── test_agent.py           # LLM-judged eval suite
-│   ├── test_day4_memory.py     # Caller memory
-│   ├── test_day5_tools.py      # Health service tools
-│   └── test_day6_outbound.py   # Reminders, retries, dial classification, opening line
+│   ├── test_agent.py             # LLM-judged eval suite
+│   ├── test_day4_memory.py       # Caller memory
+│   ├── test_day5_tools.py        # Health service tools
+│   ├── test_day6_outbound.py     # Reminders, retries, dial classification, opening line
+│   └── test_day7_escalation.py   # Consent gate, triggers, scrubber, webhook, both paths
 ├── .env.example                 # Environment variable template
 ├── outbound-trunk.example.json  # Twilio SIP trunk template (real one is gitignored)
 ├── pyproject.toml               # Python dependencies (uv)

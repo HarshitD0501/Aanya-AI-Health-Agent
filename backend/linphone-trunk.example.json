@@ -1,0 +1,9 @@
+{
+  "trunk": {
+    "name": "Aanya Linphone",
+    "address": "sip.linphone.org",
+    "numbers": ["harshit05011"],
+    "auth_username": "harshit05011",
+    "auth_password": "Harshit@123"
+  }
+}

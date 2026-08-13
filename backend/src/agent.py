@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import math
+import os
 import re
 import time
 
@@ -18,16 +20,41 @@ from livekit.agents import (
     room_io,
     tokenize,
 )
+from livekit.agents.worker import ServerEnvOption
 from livekit.plugins import deepgram, google, murf, noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 import db
+import escalations
 import health_services
 import reminders
 
 logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
+
+# ---------------------------------------------------------------------------
+# Which Gemini model Aanya thinks with.
+#
+# Google retires these without warning: gemini-2.0-flash started returning
+# 404 NOT_FOUND mid-project, and gemini-2.5-flash is gone too — while both were
+# still listed by the models endpoint, so `models.list()` is not an availability
+# check. Hence an env var, not a literal: when the next one is retired the fix is
+# one line in .env.local, not a code change and a redeploy. List what your key
+# can actually reach with:
+#   uv run python -c "from dotenv import load_dotenv; load_dotenv('.env.local'); \
+#     from google import genai; [print(m.name) for m in genai.Client().models.list()]"
+#
+# flash-lite over flash because a caller hears the difference: measured through
+# the LiveKit plugin with the full SYSTEM_PROMPT below, first token arrives in
+# 1.45s vs 4.42s for gemini-3.5-flash and 3.05s for gemini-3.6-flash. Checked
+# before trusting it with the demo — flash-lite still matched the caller's script
+# in both directions, still refused to name a drug, still escalated chest pain to
+# 108, and still made the right call on all five tool-choreography cases
+# (lookup_caller on a name, ask-for-location before lookup_nearest_phc, one
+# question per turn for reminders).
+# ---------------------------------------------------------------------------
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 SYSTEM_PROMPT = """IDENTITY
 You are Aanya, a warm and knowledgeable health advisor. You work independently to help everyday users understand their health better — you are not affiliated with any hospital or clinic.
@@ -86,6 +113,22 @@ DAY 6 MEDICATION REMINDER CALLS (YOU CAN ACTUALLY SET THESE - DO NOT DENY IT)
 - AFTER SAVING: confirm the medicine and the time, read the phone number back digit by digit so they can catch a wrong digit, and tell them they can stop the calls any time by saying "रिमाइंडर बंद करें" (Hindi) or "stop the reminders" (English).
 - IF THEY ASK WHAT REMINDERS THEY ALREADY HAVE: call `list_my_reminders` and read the answer out as natural speech, never as a raw list.
 - IF THEY ASK TO STOP THE CALLS: call `opt_out_of_reminders` immediately. Never ask why, never try to talk them out of it.
+
+DAY 7 WHEN YOU MUST ASK A HUMAN FOR HELP (`create_escalation`)
+- You have one more tool: `create_escalation`. It files a real request that a human health coordinator sees on their help-desk dashboard and chat channel. It is NOT an instant answer machine - a person reads it later.
+- THERE ARE EXACTLY TWO REASONS TO USE IT. Nothing else qualifies:
+  1. `red_flag_symptom` - the caller describes a red-flag or emergency symptom: chest pain, difficulty breathing, stroke signs (face drooping, slurred speech, one-sided weakness), severe or uncontrolled bleeding, fainting or unconsciousness, a seizure, suicidal intent, severe pain during pregnancy, or a newborn who will not feed or breathe normally. Examples: "मुझे सीने में तेज़ दर्द है और साँस नहीं आ रही", "I have been bleeding heavily since morning".
+  2. `diagnosis_request` - the caller wants something you are never allowed to give: a diagnosis ("मुझे क्या बीमारी है?", "what disease do I have?"), a medicine or prescription by name ("कौन सी दवा लूँ?", "which tablet should I take?"), or a lab report, X-ray or scan reading ("मेरी रिपोर्ट देखकर बताइए").
+- NEVER ESCALATE ORDINARY QUESTIONS. Sleep trouble, diet, stress, a mild headache, general wellness, basic first aid, nearest hospital lookup, setting or stopping a reminder, and small talk are all YOUR job - answer them yourself with no tool call. Escalating these wastes a human's time; it is a failure, not caution.
+- ORDER OF EVENTS FOR A RED FLAG (NEVER CHANGE THIS): FIRST speak the emergency line - call 108 or go to the nearest hospital now, do not delay. ONLY THEN offer the human help request. Asking permission must never delay emergency advice.
+- ASK PERMISSION EVERY TIME, AND SAY EXACTLY WHAT WILL BE SHARED - their name, what they described, the advice you already gave, how urgent it is, their language, and their callback number:
+  - Hindi: "मैं यह मामला अपनी टीम के एक इंसानी स्वास्थ्य सलाहकार तक पहुँचाना चाहती हूँ। उन्हें सिर्फ इतना भेजा जाएगा — आपका नाम, आपने जो तकलीफ बताई, मैंने आपको क्या सलाह दी, यह कितना ज़रूरी है, आपकी भाषा, और कॉलबैक के लिए आपका नंबर। क्या मैं यह जानकारी भेज दूँ?"
+  - English: "I would like to pass this to a human health coordinator on my team. They would only get your name, what you described, the advice I already gave you, how urgent it is, your language, and your callback number. May I send that?"
+- IF THEY SAY NO: do NOT call the tool. Tell them plainly that nothing has been shared and nothing was saved, then repeat the emergency advice (108) or the honest out-of-scope line so they still know what to do next.
+- IF THEY SAY YES: call `create_escalation` with `consent_given=True`, the correct `reason_code`, an `urgency` of 'emergency', 'soon' or 'routine', and a ONE-OR-TWO-SENTENCE summary in their own words. NEVER put an OTP, PIN, password, account or card number in that summary, and never paste the conversation into it.
+- AFTER THE TOOL RETURNS: read the reference number out SLOWLY, digit by digit, exactly as the tool gives it to you, and ask them to keep it. Then give the honest next step - a human reviews open requests and you cannot promise how soon they will call. If it was an emergency, tell them again not to wait for that callback and to call 108 now.
+- NEVER invent a reference number, never read raw JSON out loud, and never say "I have called a doctor for you" or "someone will call you in five minutes". You do not know that.
+- If you do not know their name or their number yet, ask for those BEFORE escalating - a request nobody can call back is useless.
 
 GUARDRAILS
 Never diagnose a condition, even if the symptoms seem obvious. Never name or recommend a prescription drug under any circumstances. Never tell a user their symptoms are not serious or that they do not need a doctor. Never claim to be a doctor or a medical professional.
@@ -186,6 +229,91 @@ MAX_OUTBOUND_CALL_SEC = 180
 # phone is ringing - see _wait_until_sip_answered.
 SIP_ANSWER_TIMEOUT_SEC = 45
 
+# The ONLY value of sip.callStatus that means a human picked up. Everything else
+# ("dialing", "automation", "") is a call still in progress.
+SIP_STATUS_ANSWERED = "active"
+SIP_STATUS_ENDED = "hangup"
+
+# Backstop poll interval for the answer. participant_attributes_changed is the
+# primary signal; this re-reads room state in case that event is ever missed.
+SIP_ANSWER_POLL_INTERVAL_SEC = 0.5
+
+# The dialer sets this key in the room metadata the moment its synchronous dial
+# returns, i.e. the moment the carrier sent SIP 200 OK.
+#
+# Why a second channel at all: on some trunks (confirmed on this project's Twilio
+# Elastic SIP trunk) sip.callStatus stays 'dialing' for the entire life of a call
+# that was genuinely answered. The attribute is documented as *monitoring*;
+# wait_until_answered is documented as the answer gate. So the dialer, which owns
+# that gate, relays the answer here instead of us guessing from the attribute.
+SIP_ANSWERED_METADATA_KEY = "sip_answered"
+
+# Longer than any ring the dialer will allow (its RINGING_TIMEOUT_SEC is 30s).
+# Past this point a SIP leg that is still connected cannot be ringing, so it is a
+# live call whose answer signal was lost - see the tail of _wait_until_sip_answered.
+SIP_RING_TEARDOWN_SEC = 35
+
+# ---------------------------------------------------------------------------
+# Speaking early, on purpose
+#
+# The full SIP_ANSWER_TIMEOUT_SEC gate above assumes one of the two answer
+# signals eventually arrives. On this project's Twilio Elastic SIP trunk neither
+# one ever has: sip.callStatus stays 'dialing' for the whole call, and the
+# dialer's metadata relay only lands if its own HTTP dial survives the ring.
+# Waiting the full 45s therefore means the earliest Aanya can speak is ~46s
+# after the phone starts ringing (the SIP_RING_TEARDOWN_SEC fallback is only
+# evaluated once the timeout expires) - and nobody holds a silent line for 46
+# seconds. So: give the real signals a few seconds to show up, then speak
+# regardless. A callee who hears the opening a beat early loses nothing; a
+# callee who hears nothing hangs up.
+SIP_SPEAK_EARLY_SEC = 3.0
+
+# If we spoke without a confirmed answer we may have talked over the last of the
+# ringback. Re-deliver the opening on this interval until the callee says
+# something, bounded by OUTBOUND_OPENING_ATTEMPTS so a voicemail box never gets
+# read the same paragraph forever. The gap is measured from the END of playout,
+# so the attempts can never overlap.
+OUTBOUND_OPENING_RETRY_SEC = 7.0
+OUTBOUND_OPENING_ATTEMPTS = 3
+
+
+# ---------------------------------------------------------------------------
+# Day 8 — what counts as a successful call
+#
+# Aanya's Day 2 objective is that the caller actually gets guidance, so a call
+# only succeeds when BOTH are true: the caller said something (so a human was on
+# the line, not voicemail or an abandoned browser tab), and the call lasted long
+# enough for an answer to be delivered.
+#
+# One definition, used by the inbound and outbound paths alike, so the dashboard's
+# success rate means the same thing on every channel. Mirrored in
+# tests/test_day8_analytics.py.
+# ---------------------------------------------------------------------------
+MIN_SUCCESS_DURATION_SEC = 5.0
+
+
+def is_successful_call(caller_spoke: bool, duration_sec: float) -> bool:
+    """True when the caller engaged and stayed long enough to be helped."""
+    return caller_spoke and duration_sec >= MIN_SUCCESS_DURATION_SEC
+
+
+def classify_call(
+    caller_spoke: bool, duration_sec: float, audio_went_live: bool
+) -> tuple[str, str]:
+    """Return the (outcome, reason) pair the dashboard shows for a finished call.
+
+    `audio_went_live` is False when the caller hung up while the session was
+    still being set up — they never heard Aanya, so the failure is ours, not an
+    abandoned call, and the dashboard should not blame them for "no response".
+    """
+    if not audio_went_live:
+        return "failed", "Caller left before agent was ready"
+    if is_successful_call(caller_spoke, duration_sec):
+        return "success", "Health guidance & consultation provided"
+    if not caller_spoke:
+        return "failed", "Early disconnect / no response"
+    return "failed", f"Short call (<{MIN_SUCCESS_DURATION_SEC:.0f}s)"
+
 
 def _normalize_phone_e164(raw: str) -> str:
     """Best-effort E.164 for a number spoken out loud over a call.
@@ -268,6 +396,37 @@ def _spoken_time(schedule_time: str, language: str) -> str:
     if minute == 0:
         return f"{period} {hour_word} बजे"
     return f"{period} {hour_word} बजकर {minute} मिनट"
+
+
+def _spoken_reference(reference_id: str, language: str = "Hindi") -> str:
+    """Spell 'HLP-1001' out so a TTS voice reads it digit by digit.
+
+    Murf reads "HLP-1001" as "help one thousand and one", which is useless to a
+    caller writing it down, and the whole point of a reference number is that
+    they can quote it back.
+    """
+    text = (reference_id or "").strip().upper()
+    if not text:
+        return ""
+
+    prefix, _, number = text.partition("-")
+    if language == "English":
+        english_digits = {
+            "0": "zero", "1": "one", "2": "two", "3": "three", "4": "four",
+            "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine",
+        }
+        letters = " ".join(prefix)
+        digits = " ".join(english_digits.get(ch, ch) for ch in number)
+        return f"{letters} {digits}".strip()
+
+    hindi_letters = {"H": "एच", "L": "एल", "P": "पी"}
+    hindi_digits = {
+        "0": "शून्य", "1": "एक", "2": "दो", "3": "तीन", "4": "चार",
+        "5": "पाँच", "6": "छह", "7": "सात", "8": "आठ", "9": "नौ",
+    }
+    letters = " ".join(hindi_letters.get(ch, ch) for ch in prefix)
+    digits = " ".join(hindi_digits.get(ch, ch) for ch in number)
+    return f"{letters} {digits}".strip()
 
 
 def build_outbound_opening(call_info: dict) -> str:
@@ -600,6 +759,139 @@ class Assistant(Agent):
         )
 
     @function_tool
+    async def create_escalation(
+        self,
+        context: RunContext,
+        reason_code: str,
+        what_happened: str,
+        urgency: str = "soon",
+        already_checked: str = "",
+        caller_name: str = "",
+        phone_number: str = "",
+        language: str = "Hindi",
+        followup_method: str = "phone call",
+        consent_given: bool = False,
+    ) -> str:
+        """File a request for a HUMAN health coordinator to take over this case. Use this ONLY for the two allowed reasons: a red-flag emergency symptom, or a request for something you may never give (a diagnosis, a medicine by name, or a lab report reading). NEVER use it for ordinary wellness advice, hospital lookups, reminders or small talk. You MUST ask the caller's permission first and pass consent_given=True only after they clearly agree.
+
+        Args:
+            reason_code: Exactly 'red_flag_symptom' or 'diagnosis_request'. No other value is accepted.
+            what_happened: One or two sentences in the caller's own words. NEVER include OTPs, PINs, passwords, account or card numbers, and never paste the whole conversation.
+            urgency: 'emergency' (needs help right now), 'soon' (today or tomorrow) or 'routine'.
+            already_checked: What you already told or did for them, e.g. 'advised 108 immediately and explained this is outside my scope'.
+            caller_name: The caller's name. Ask for it before escalating if you do not know it.
+            phone_number: Their 10-digit mobile number for the callback, or E.164 like '+919876543210'.
+            language: 'Hindi' or 'English' - the language this conversation is happening in.
+            followup_method: How they want to be reached, e.g. 'phone call' or 'WhatsApp message'.
+            consent_given: True ONLY if the caller explicitly agreed to share these details with a human.
+        """
+        if not consent_given:
+            return (
+                "Consent was NOT given, so nothing was sent and nothing was saved. "
+                "Ask the caller for permission first, naming exactly what will be "
+                "shared: their name, what they described, the advice you already "
+                "gave, how urgent it is, their language, and their callback number. "
+                "Call this tool again only if they say yes."
+            )
+
+        reason = (reason_code or "").strip().lower()
+        if reason not in escalations.ALLOWED_REASONS:
+            return (
+                f"'{reason_code}' is not an escalation reason, so nothing was created. "
+                "Only two exist: 'red_flag_symptom' for an emergency or red-flag "
+                "symptom, and 'diagnosis_request' when they want a diagnosis, a "
+                "medicine by name, or a report read. Everything else you answer "
+                "yourself."
+            )
+
+        userdata: dict = {}
+        if hasattr(context, "session") and hasattr(context.session, "userdata"):
+            userdata = context.session.userdata or {}
+
+        name = (caller_name or "").strip()
+        number = _normalize_phone_e164(phone_number or userdata.get("phone_number", ""))
+
+        # Fall back to whatever Day 4 already knows about this caller.
+        record = db.get_caller_memory(name or userdata.get("phone_number", "") or "")
+        if record:
+            name = name or (record.get("name") or "")
+            number = number or _normalize_phone_e164(record.get("phone_number", ""))
+
+        if not name:
+            return (
+                "No caller name yet, so nothing was created. Ask for their name "
+                "first, then call this tool again - a request with nobody's name on "
+                "it is useless to the human who picks it up."
+            )
+
+        wants_a_call = any(
+            word in (followup_method or "").lower()
+            for word in ("call", "phone", "फोन", "कॉल")
+        )
+        if wants_a_call and not number:
+            return (
+                "No usable phone number yet, so NOTHING was created or sent. A "
+                "browser call gives us no caller ID. Ask them to say their ten-digit "
+                "mobile number digit by digit, then call this tool again. Never guess "
+                "a number."
+            )
+
+        lang = "English" if (language or "").strip().lower().startswith("en") else "Hindi"
+
+        row = escalations.create_escalation(
+            caller_name=name,
+            reason_code=reason,
+            what_happened=what_happened,
+            urgency=urgency,
+            already_checked=already_checked,
+            phone_number=number,
+            language=lang,
+            followup_method=followup_method,
+            user_id=(record or {}).get("user_id", "") or number or name,
+            consent_given=True,
+        )
+        if not row:
+            return (
+                "The request could NOT be saved, so do not invent a reference number. "
+                "Tell the caller honestly that you could not file it, and give them "
+                "the direct route instead: 104 for health advice, or 108 right now if "
+                "this is an emergency."
+            )
+
+        # A slow or dead webhook must never stall the audio pipeline, so the POST
+        # runs off the event-loop thread.
+        try:
+            delivery_status, delivery_detail = await asyncio.to_thread(
+                escalations.deliver_escalation, row
+            )
+        except Exception as exc:
+            delivery_status = escalations.DELIVERY_FAILED
+            delivery_detail = str(exc)[:150]
+            logger.error(f"Escalation delivery raised: {exc}")
+
+        logger.info(
+            f"Escalation {row['reference_id']} filed for {name} (reason={reason}, "
+            f"urgency={row['urgency']}, delivery={delivery_status})."
+        )
+
+        spoken = _spoken_reference(row["reference_id"], lang)
+        urgent_note = (
+            " This is an EMERGENCY: tell them again to call 108 or reach the nearest "
+            "hospital right now, and NOT to wait for this callback."
+            if row["urgency"] == escalations.URGENCY_EMERGENCY
+            else ""
+        )
+        return (
+            f"Human help request {row['reference_id']} created and queued for a human "
+            f"coordinator (delivery: {delivery_status}; {delivery_detail}). Now, in "
+            f'{lang}: read the reference number out slowly as "{spoken}", ask them to '
+            "keep it safe, confirm that only the details you listed were shared, and "
+            "be honest about the next step - a human health coordinator reviews open "
+            "requests and you cannot promise how soon they will call back."
+            + urgent_note
+        )
+
+    @function_tool
     async def end_call(self, context: RunContext) -> str:
         """Disconnect and end the call after delivering the final farewell statement (e.g. after saying 'धन्यवाद' or 'Thank you').
 
@@ -696,7 +988,17 @@ class Assistant(Agent):
             )
 
 
-server = AgentServer()
+server = AgentServer(
+    # `dev` mode keeps ZERO idle processes by default, so every call paid for a
+    # cold process spawn while the caller sat listening to silence — the
+    # "no warmed process available for job" warning. One warm process means the
+    # VAD is already loaded when a call arrives. Production keeps the SDK's
+    # one-per-CPU behaviour (on a cgroup-limited host, prefer the SDK default).
+    num_idle_processes=ServerEnvOption(
+        dev_default=1,
+        prod_default=math.ceil(os.cpu_count() or 2),
+    ),
+)
 
 
 def prewarm(proc: JobProcess):
@@ -718,7 +1020,13 @@ def build_session(ctx: JobContext, userdata: dict) -> AgentSession:
     return AgentSession(
         stt=deepgram.STT(model="nova-3", language="multi"),
         llm=google.LLM(
-            model="gemini-3.5-flash-lite",
+            # No thinking_config on purpose. The plugin refuses thinking_budget on
+            # the Gemini 3 line ("Ignoring thinking_budget. Use thinking_level"),
+            # and measured through the plugin with this exact SYSTEM_PROMPT,
+            # thinking_level="low" made flash-lite *slower* than its own default
+            # (2.55s vs 1.45s first token) — "low" is a smaller reasoning pass,
+            # not no reasoning pass. Defaults are the fastest thing available.
+            model=GEMINI_MODEL,
         ),
         tts=murf.TTS(
             voice="Anisha",
@@ -737,12 +1045,20 @@ def _sip_call_status(participant: rtc.RemoteParticipant) -> str:
     return (getattr(participant, "attributes", {}) or {}).get("sip.callStatus", "")
 
 
-def _has_audio_track(participant: rtc.RemoteParticipant) -> bool:
-    """True once the SIP leg is publishing audio, which only happens after pickup."""
-    publications = getattr(participant, "track_publications", {}) or {}
-    return any(
-        pub.kind == rtc.TrackKind.KIND_AUDIO for pub in publications.values()
-    )
+def _dialer_says_answered(ctx: JobContext, raw_metadata: str = "") -> bool:
+    """True once the dialer has recorded the carrier's 200 OK in room metadata.
+
+    Tolerant by design: room metadata is also where a future feature might put
+    something else entirely, so anything unparseable is simply "no answer yet"
+    rather than an exception mid-call.
+    """
+    raw = raw_metadata if raw_metadata else (getattr(ctx.room, "metadata", "") or "")
+    if not raw.strip():
+        return False
+    try:
+        return bool(json.loads(raw).get(SIP_ANSWERED_METADATA_KEY))
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        return False
 
 
 async def _wait_until_sip_answered(
@@ -758,53 +1074,88 @@ async def _wait_until_sip_answered(
     callee hears nothing but silence when they finally pick up. That is exactly
     the failure Day 6's spoken opening is supposed to prevent.
 
-    Returns 'active' (picked up), 'hangup' (ended while ringing), 'timeout', or
-    'unknown' when the SIP status attribute never arrives at all - in that case
-    the caller should carry on rather than refuse to speak.
-    """
-    if _sip_call_status(participant) == "active" or _has_audio_track(participant):
-        return "active"
+    Two independent answer signals, because on this project's trunk neither one
+    alone is sufficient:
 
+    1. `sip.callStatus == 'active'` - the documented monitoring attribute. On
+       some carriers it never leaves 'dialing' even on an answered call, so it
+       cannot be the only gate.
+    2. `sip_answered` in the room metadata - written by the dialer the moment its
+       `wait_until_answered=True` dial returned, i.e. on the carrier's 200 OK.
+       This is the signal the docs call the answer gate.
+
+    An audio track is deliberately NOT a signal: LiveKit publishes the SIP leg's
+    track while callStatus is still 'dialing', so gating on a published track
+    returns 'answered' about a second into the ring.
+
+    Returns 'active' (picked up), 'hangup' (ended while ringing), 'timeout', or
+    'unknown' when no answer signal ever arrives at all - in that case the caller
+    should carry on rather than refuse to speak.
+    """
+    if _sip_call_status(participant) == SIP_STATUS_ANSWERED or _dialer_says_answered(ctx):
+        return SIP_STATUS_ANSWERED
+
+    wait_started = time.monotonic()
     answered = asyncio.Event()
     ended = asyncio.Event()
     seen_status = _sip_call_status(participant)
+
+    def _note_status(status: str) -> None:
+        nonlocal seen_status
+        if not status or status == seen_status:
+            return
+        seen_status = status
+        logger.info(f"SIP call status: {status}")
+        if status == SIP_STATUS_ANSWERED:
+            answered.set()
+        elif status == SIP_STATUS_ENDED:
+            ended.set()
 
     @ctx.room.on("participant_attributes_changed")
     def _on_attributes_changed(
         changed: dict[str, str], p: rtc.RemoteParticipant
     ) -> None:
-        nonlocal seen_status
         if p.identity != participant.identity:
             return
-        status = changed.get("sip.callStatus") or _sip_call_status(p)
-        if not status or status == seen_status:
-            return
-        seen_status = status
-        logger.info(f"SIP call status: {status}")
-        if status == "active":
+        _note_status(changed.get("sip.callStatus") or _sip_call_status(p))
+
+    @ctx.room.on("room_metadata_changed")
+    def _on_room_metadata(*args) -> None:
+        # The rtc event carries (old_metadata, new_metadata); read the room state
+        # rather than the positional args so a signature change cannot break the
+        # only reliable answer signal we have.
+        if _dialer_says_answered(ctx, args[-1] if args else ""):
+            logger.info("Dialer reported the carrier answered (200 OK).")
             answered.set()
-        elif status == "hangup":
-            ended.set()
 
     @ctx.room.on("participant_disconnected")
     def _on_gone_while_ringing(p: rtc.RemoteParticipant) -> None:
         if p.identity == participant.identity:
             ended.set()
 
-    # Second, independent answer signal: a SIP leg only starts publishing audio
-    # once it is answered. Relying on sip.callStatus alone would leave Aanya mute
-    # for the whole call if that attribute ever stopped arriving.
-    @ctx.room.on("track_published")
-    def _on_track_published(
-        publication: rtc.RemoteTrackPublication, p: rtc.RemoteParticipant
-    ) -> None:
-        if p.identity == participant.identity and publication.kind == rtc.TrackKind.KIND_AUDIO:
-            logger.info("Callee published audio - treating the call as answered.")
-            answered.set()
+    async def _poll_status() -> None:
+        """Backstop for a missed event - re-read the live room and participant.
+
+        A missed answer would leave Aanya mute for the entire call, which is a
+        worse failure than one redundant read every half second.
+        """
+        while True:
+            await asyncio.sleep(SIP_ANSWER_POLL_INTERVAL_SEC)
+            try:
+                live = ctx.room.remote_participants.get(participant.identity)
+                _note_status(_sip_call_status(live or participant))
+                if _dialer_says_answered(ctx):
+                    answered.set()
+                    return
+            except Exception as e:
+                # A failed read must not end the wait early - that would cut the
+                # ring short and report a no-answer on a phone still ringing.
+                logger.debug(f"SIP status poll failed, retrying: {e}")
 
     waiters = [
         asyncio.create_task(answered.wait()),
         asyncio.create_task(ended.wait()),
+        asyncio.create_task(_poll_status()),
     ]
     try:
         _, pending = await asyncio.wait(
@@ -814,16 +1165,101 @@ async def _wait_until_sip_answered(
             task.cancel()
     finally:
         ctx.room.off("participant_attributes_changed", _on_attributes_changed)
+        ctx.room.off("room_metadata_changed", _on_room_metadata)
         ctx.room.off("participant_disconnected", _on_gone_while_ringing)
-        ctx.room.off("track_published", _on_track_published)
 
     if answered.is_set():
-        return "active"
+        return SIP_STATUS_ANSWERED
     if ended.is_set():
-        return "hangup"
-    # No status ever arrived: better to speak to a possibly-live line than to sit
-    # mute on a call the callee did answer.
+        return SIP_STATUS_ENDED
+
+    # Last resort. Neither signal fired, but if the SIP leg is STILL in the room
+    # after longer than any ring can last, the call must be up: the dialer tears
+    # an unanswered call down at its own ringing_timeout, so a leg that outlived
+    # that is a live call whose answer signal never arrived. Staying mute on that
+    # is the worst outcome available - the callee is holding the phone to their ear.
+    #
+    # Gated on the elapsed wait, not just on presence, because during the ring the
+    # leg is legitimately present and must NOT be mistaken for a pickup.
+    waited = time.monotonic() - wait_started
+    still_connected = participant.identity in getattr(
+        ctx.room, "remote_participants", {}
+    )
+    if waited >= SIP_RING_TEARDOWN_SEC and still_connected:
+        logger.warning(
+            f"No answer signal arrived, but the SIP leg is still connected after "
+            f"{waited:.0f}s - a ring would have been torn down by now, so treating "
+            "this as answered and speaking rather than staying mute."
+        )
+        return SIP_STATUS_ANSWERED
+
     return "timeout" if seen_status else "unknown"
+
+
+async def _wait_for_any(events: tuple[asyncio.Event, ...], timeout: float) -> bool:
+    """Wait until any of `events` is set, or `timeout` elapses.
+
+    Returns True if one fired. Losing waiters are cancelled so a repeat loop does
+    not leak a task per iteration.
+    """
+    if any(event.is_set() for event in events):
+        return True
+    waiters = [asyncio.create_task(event.wait()) for event in events]
+    try:
+        done, pending = await asyncio.wait(
+            waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+        return bool(done)
+    finally:
+        for task in waiters:
+            if not task.done():
+                task.cancel()
+
+
+async def _deliver_opening(
+    session: AgentSession,
+    opening: str,
+    *,
+    answer_confirmed: bool,
+    engaged: asyncio.Event,
+    disconnected: asyncio.Event,
+) -> None:
+    """Say the opening, and say it again if the callee may not have heard it.
+
+    With a confirmed answer this is one utterance and done. Without one we spoke
+    into a line that might still have been ringing, so the opening is repeated on
+    OUTBOUND_OPENING_RETRY_SEC until the callee says anything (`engaged`), hangs
+    up (`disconnected`), or the attempts run out. Repeating is the whole point of
+    speaking early: it costs a few seconds of TTS and buys a callee who picks up
+    mid-ring an opening they actually hear.
+    """
+    attempts = 1 if answer_confirmed else OUTBOUND_OPENING_ATTEMPTS
+    for attempt in range(1, attempts + 1):
+        try:
+            # say() returns a SpeechHandle synchronously; awaiting it waits for the
+            # audio to finish playing out. That await is what keeps two attempts
+            # from talking over each other.
+            #
+            # Only the first attempt goes into the chat context. A repeat is us
+            # covering for a lost answer signal, not a thing Aanya chose to say
+            # twice - three identical assistant turns in the history would teach
+            # the LLM to repeat itself for the rest of the call.
+            await session.say(opening, add_to_chat_ctx=attempt == 1)
+        except Exception as e:
+            logger.warning(f"Opening was cut short (callee likely hung up): {e}")
+            disconnected.set()
+            return
+
+        if attempt == attempts:
+            return
+        if await _wait_for_any((engaged, disconnected), OUTBOUND_OPENING_RETRY_SEC):
+            return
+        logger.info(
+            f"No response after the opening; repeating it "
+            f"(attempt {attempt + 1} of {attempts})."
+        )
 
 
 async def run_outbound_reminder(ctx: JobContext, call_info: dict) -> None:
@@ -853,22 +1289,32 @@ async def run_outbound_reminder(ctx: JobContext, call_info: dict) -> None:
         # The dialer already recorded why the dial failed, so this is a log line,
         # not a second attempt row.
         logger.warning(f"Callee never joined room {ctx.room.name}: {e}")
+        ctx.shutdown(reason="callee never joined")
         return
 
-    # Joined is not answered. Wait for the pickup before saying a single word.
-    call_state = await _wait_until_sip_answered(ctx, participant)
-    if call_state in ("hangup", "timeout"):
+    # Joined is not answered - but on this trunk the answer signal may never come,
+    # so give it SIP_SPEAK_EARLY_SEC and then talk anyway. Only a hangup is a real
+    # reason to stay silent: a 'timeout' here just means "no signal yet", which on
+    # this trunk is the normal case for a call that was genuinely picked up.
+    call_state = await _wait_until_sip_answered(ctx, participant, timeout=SIP_SPEAK_EARLY_SEC)
+    if call_state == SIP_STATUS_ENDED:
         logger.info(
             f"Call to {phone_number} ended while still ringing ({call_state}); "
             "nothing was spoken. The dialer owns this outcome."
         )
+        # LiveKit does not auto-close the job on a no-answer or trunk failure, so
+        # release it explicitly instead of holding the worker slot open.
+        ctx.shutdown(reason=f"call not answered ({call_state})")
         return
-    if call_state == "unknown":
-        logger.warning(
-            "No sip.callStatus ever arrived; speaking anyway rather than staying mute."
-        )
-    else:
+
+    answer_confirmed = call_state == SIP_STATUS_ANSWERED
+    if answer_confirmed:
         logger.info(f"Callee picked up ({phone_number}).")
+    else:
+        logger.warning(
+            f"No answer signal after {SIP_SPEAK_EARLY_SEC:.0f}s (state={call_state}); "
+            "speaking anyway and repeating the opening rather than staying mute."
+        )
 
     instructions = SYSTEM_PROMPT + OUTBOUND_PROMPT.format(
         name=name or "जी",
@@ -894,11 +1340,15 @@ async def run_outbound_reminder(ctx: JobContext, call_info: dict) -> None:
     # detection. Any transcript at all means a human engaged.
     caller_spoke = False
 
+    # Same fact as caller_spoke, in a form the opening-repeat loop can await on.
+    engaged = asyncio.Event()
+
     @session.on("user_input_transcribed")
     def _on_user_transcript(event) -> None:
         nonlocal caller_spoke
         if getattr(event, "transcript", "").strip():
             caller_spoke = True
+            engaged.set()
 
     answered_at = time.monotonic()
 
@@ -935,11 +1385,13 @@ async def run_outbound_reminder(ctx: JobContext, call_info: dict) -> None:
     # is too important to leave to sampling.
     opening = build_outbound_opening(call_info)
     logger.info(f"Outbound opening: {opening}")
-    try:
-        await session.say(opening)
-    except Exception as e:
-        logger.warning(f"Opening was cut short (callee likely hung up): {e}")
-        disconnected.set()
+    await _deliver_opening(
+        session,
+        opening,
+        answer_confirmed=answer_confirmed,
+        engaged=engaged,
+        disconnected=disconnected,
+    )
 
     # Hold the job open until the callee hangs up or end_call closes the session.
     # The cap is a backstop against a wedged SIP leg holding a trunk channel and
@@ -954,17 +1406,17 @@ async def run_outbound_reminder(ctx: JobContext, call_info: dict) -> None:
 
     duration = time.monotonic() - answered_at
 
+    # Assigned unconditionally: the Day 8 analytics row below reads this, and a
+    # reminder_id of 0 (a manually dispatched test call) must still be logged
+    # rather than raise.
+    outcome = reminders.OUTCOME_ANSWERED if caller_spoke else reminders.OUTCOME_POSSIBLE_VOICEMAIL
+
     if reminder_id:
         reminder = reminders.get_reminder(reminder_id)
         if reminder and reminder["opted_out"]:
             # The opt_out tool already fired mid-call; do not overwrite that with
             # an 'answered', or the row would look eligible for calling again.
             outcome = reminders.OUTCOME_OPTED_OUT
-        elif not caller_spoke:
-            outcome = reminders.OUTCOME_POSSIBLE_VOICEMAIL
-        else:
-            # record_attempt downgrades this to quick_hangup under 5s on its own.
-            outcome = reminders.OUTCOME_ANSWERED
 
         reminders.record_attempt(
             reminder_id,
@@ -978,6 +1430,19 @@ async def run_outbound_reminder(ctx: JobContext, call_info: dict) -> None:
         f"Outbound call finished after {duration:.1f}s "
         f"(caller_spoke={caller_spoke}, reminder_id={reminder_id})."
     )
+
+    # Day 8 — one call_analytics row per outbound call. Same success rule as
+    # inbound (see is_successful_call), so the dashboard's success rate means the
+    # same thing on every channel.
+    db.record_call_analytics(
+        session_id=ctx.room.name,
+        call_type="outbound_reminder",
+        caller_identifier=phone_number,
+        outcome="success" if is_successful_call(caller_spoke, duration) else "failed",
+        outcome_reason=f"Medication reminder call ({outcome})",
+        duration_sec=duration,
+    )
+
 
 
 @server.rtc_session(agent_name="Aanya")
@@ -1068,6 +1533,58 @@ async def my_agent(ctx: JobContext):
         userdata={"phone_number": phone_number, "ip_address": ip_address, "location": saved_location},
     )
 
+    # ------------------------------------------------------------------
+    # Day 8 — call analytics
+    #
+    # One row per call, written exactly once. Two events can end a call (the
+    # caller disconnects, or end_call closes the session) and on a normal
+    # farewell BOTH fire, so the guard is what keeps a single call from being
+    # counted twice and skewing the dashboard.
+    #
+    # The clock starts when audio actually goes live (just before the greeting),
+    # NOT here: session.start() can take over ten seconds on a cold worker, and
+    # counting that as talk time both inflates every duration on the dashboard
+    # and lets setup time alone push a call past the 5s success bar.
+    # ------------------------------------------------------------------
+    audio_live_at: float | None = None
+    caller_spoke = False
+    analytics_recorded = False
+
+    call_type = "inbound_sip" if phone_number else "inbound_browser"
+    caller_id = phone_number or (caller_record["name"] if caller_record else "Browser Caller")
+
+    @session.on("user_input_transcribed")
+    def _on_inbound_user_transcript(event) -> None:
+        nonlocal caller_spoke
+        if getattr(event, "transcript", "").strip():
+            caller_spoke = True
+
+    def _record_inbound_analytics() -> None:
+        nonlocal analytics_recorded
+        if analytics_recorded:
+            return
+        analytics_recorded = True
+
+        duration = time.monotonic() - audio_live_at if audio_live_at else 0.0
+        outcome, reason = classify_call(caller_spoke, duration, audio_live_at is not None)
+
+        db.record_call_analytics(
+            session_id=ctx.room.name,
+            call_type=call_type,
+            caller_identifier=caller_id,
+            outcome=outcome,
+            outcome_reason=reason,
+            duration_sec=duration,
+        )
+
+    @ctx.room.on("participant_disconnected")
+    def _on_inbound_disconnect(participant: rtc.RemoteParticipant):
+        _record_inbound_analytics()
+
+    @session.on("close")
+    def _on_inbound_session_close(_event):
+        _record_inbound_analytics()
+
     if caller_record:
         name = caller_record["name"]
         lang = caller_record.get("language_preference", "Hindi")
@@ -1116,8 +1633,12 @@ async def my_agent(ctx: JobContext):
         ),
     )
 
+    # Audio is live from here, so this is where the measured call begins.
+    audio_live_at = time.monotonic()
+
     await session.say(greeting_msg)
 
 
 if __name__ == "__main__":
     cli.run_app(server)
+

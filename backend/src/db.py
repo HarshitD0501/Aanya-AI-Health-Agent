@@ -85,6 +85,39 @@ def ensure_db_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_attempts_reminder ON call_attempts (reminder_id, attempted_at)"
     )
 
+    # ---------------------------------------------------------------------
+    # Day 7 — Human escalation requests
+    #
+    # One row per "Aanya stopped and asked a human to take over". The row is the
+    # source of truth: the Discord webhook and the /help-desk dashboard both read
+    # from here, so a failed webhook can never lose an escalation.
+    # ---------------------------------------------------------------------
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS escalations (
+            escalation_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            reference_id    TEXT NOT NULL DEFAULT '',
+            caller_name     TEXT NOT NULL,
+            user_id         TEXT DEFAULT '',
+            phone_number    TEXT DEFAULT '',
+            language        TEXT DEFAULT 'Hindi',
+            reason_code     TEXT NOT NULL,
+            urgency         TEXT NOT NULL,
+            what_happened   TEXT NOT NULL,
+            already_checked TEXT DEFAULT '',
+            followup_method TEXT DEFAULT 'phone call',
+            status          TEXT DEFAULT 'open',
+            consent_given   INTEGER DEFAULT 1,
+            delivery_status TEXT DEFAULT 'pending',
+            delivery_detail TEXT DEFAULT '',
+            created_at      TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_escalation_open ON escalations (status, created_at)"
+    )
+
     # Adherence columns were added after the first reminders shipped, so migrate
     # rather than relying on CREATE TABLE IF NOT EXISTS (which is a no-op here).
     cursor.execute("PRAGMA table_info(medication_reminders)")
@@ -97,6 +130,27 @@ def ensure_db_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE medication_reminders ADD COLUMN last_response_at TEXT DEFAULT ''"
         )
+
+    # ---------------------------------------------------------------------
+    # Day 8 — Call Analytics Dashboard Logging
+    # ---------------------------------------------------------------------
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS call_analytics (
+            call_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            call_type TEXT NOT NULL,
+            caller_identifier TEXT DEFAULT '',
+            outcome TEXT NOT NULL,
+            outcome_reason TEXT DEFAULT '',
+            duration_sec REAL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_call_analytics_created ON call_analytics (created_at)"
+    )
 
 
 def init_db(db_path: Optional[Path] = None) -> None:
@@ -258,3 +312,97 @@ def delete_caller_memory(query: str, db_path: Optional[Path] = None) -> bool:
     conn.close()
     logger.info(f"Deleted caller memory for query='{clean_query}', rows affected: {rows_affected}.")
     return rows_affected > 0
+
+
+def mask_identifier(raw: str) -> str:
+    """Mask phone number or identity for caller privacy (Step 6)."""
+    if not raw:
+        return "Anonymous Caller"
+    clean = raw.strip()
+    if clean.startswith("+") or clean.isdigit():
+        if len(clean) > 6:
+            return clean[:3] + " **** " + clean[-3:]
+        return clean[:2] + "****"
+    # Name or text identity
+    if len(clean) > 2:
+        return clean[0] + "***" + clean[-1]
+    return clean[0] + "***"
+
+
+def record_call_analytics(
+    session_id: str,
+    call_type: str,
+    caller_identifier: str = "",
+    outcome: str = "success",
+    outcome_reason: str = "",
+    duration_sec: float = 0.0,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """Record the outcome of a call in SQLite for the Day 8 Analytics Dashboard."""
+    init_db(db_path)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    masked_id = mask_identifier(caller_identifier)
+
+    conn = get_connection(db_path)
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO call_analytics (session_id, call_type, caller_identifier, outcome, outcome_reason, duration_sec, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id or "session_unknown",
+                call_type or "inbound_browser",
+                masked_id,
+                outcome.lower(),
+                outcome_reason,
+                round(duration_sec, 1),
+                now_iso,
+            ),
+        )
+    conn.close()
+    logger.info(
+        f"Recorded call analytics: session='{session_id}', type='{call_type}', "
+        f"outcome='{outcome}', duration={duration_sec:.1f}s"
+    )
+    return True
+
+
+def get_call_analytics_summary(db_path: Optional[Path] = None) -> dict[str, Any]:
+    """Retrieve summary counts and recent calls for analytics dashboard."""
+    init_db(db_path)
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(*) FROM call_analytics")
+    total_calls = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM call_analytics WHERE outcome = 'success'")
+    successful_calls = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM call_analytics WHERE outcome = 'failed'")
+    failed_calls = cursor.fetchone()[0]
+
+    cursor.execute(
+        """
+        SELECT call_id, session_id, call_type, caller_identifier, outcome, outcome_reason, duration_sec, created_at
+        FROM call_analytics
+        ORDER BY call_id DESC
+        LIMIT 50
+        """
+    )
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+
+    success_rate = (
+        round((successful_calls / total_calls) * 100, 1) if total_calls > 0 else 0.0
+    )
+
+    return {
+        "total_calls": total_calls,
+        "successful_calls": successful_calls,
+        "failed_calls": failed_calls,
+        "success_rate": f"{success_rate}%",
+        "recent_calls": rows,
+    }
+
