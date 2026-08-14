@@ -5,6 +5,7 @@ import math
 import os
 import re
 import time
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 from livekit import rtc
@@ -12,6 +13,7 @@ from livekit.agents import (
     Agent,
     AgentServer,
     AgentSession,
+    ChatContext,
     JobContext,
     JobProcess,
     RunContext,
@@ -24,6 +26,7 @@ from livekit.agents.worker import ServerEnvOption
 from livekit.plugins import deepgram, google, murf, noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
+import appointments
 import db
 import escalations
 import health_services
@@ -86,18 +89,10 @@ MEMORY,TOOLS & CONSENT (DAY 4 - HEALTH ACCESS TRACK)
 - HARD RULE (HEALTH ACCESS CONSENT): Before calling `save_caller_memory`, you MUST ALWAYS ask explicit permission from the caller first in their language.
 - Call `save_caller_memory` ONLY if the caller explicitly says YES / agrees. If the caller says NO / declines or refuses to share their name, DO NOT save anything, respect their privacy, and reassure them that no data was saved.
 - Save ONLY relevant health facts: `age_band`, `ongoing_conditions`, `last_triage_outcome`. NEVER store full conversation transcripts, prescriptions, or sensitive ID numbers.
-DAY 5 REAL-WORLD DOMAIN TOOLS (PHC & PUBLIC AUTHORIZED HEALTH CENTERS LOOKUP)
-- You have external domain tools: `lookup_nearest_phc` and `lookup_emergency_helpline`.
-- NEAREST HOSPITAL USER REQUEST FLOW (STRICT 2-STEP INTERACTIVE WORKFLOW):
-  0. DO NOT ask for location in the starting opening greeting! Ask for location ONLY when the user explicitly asks for nearest hospital or health center.
-  1. When a user asks for nearest hospitals or authorized health centers (e.g., "suggest nearest hospital", "mujhe nearest hospital batao"):
-  2. DO NOT call `lookup_nearest_phc` yet if location is not explicitly stated in that sentence or saved in memory!
-  3. STEP 1 (ASK LOCATION): You MUST ask the user first: "आप किस शहर, जिले या स्थान पर हैं?" (Which city, district, or place are you located in?).
-  4. STEP 2 (FETCH & SUGGEST): As soon as the user states or replies with their location/city, IMMEDIATELY call `lookup_nearest_phc` passing the EXACT location spoken by the user (do NOT use any default or guessed city).
-  5. STEP 3 (SUGGEST): Read out the returned nearest hospitals and Public Authorized Health Centers clearly in spoken prose.
-- DATA FRESHNESS: Always mention that the data is from the 2026 National Health Registry / OpenStreetMap.
-- NATURAL SPOKEN OUTPUT: Speak facility name, address, and phone number naturally. NEVER read out raw JSON!
-- GRACEFUL FAILURE HANDLING: If the tool returns an error or timeout, speak a calm, helpful fallback message advising them to call 108 Emergency Ambulance or visit their nearest civil hospital.
+DAY 9 CLINIC & APPOINTMENT SPECIALIST HANDOFF (`transfer_to_clinic_specialist`)
+- You have a tool: `transfer_to_clinic_specialist`.
+- When the caller asks for Primary Health Centres (PHC), Community Health Centres (CHC), clinics, hospitals, finding nearest healthcare facilities, or booking an appointment at a clinic (e.g. "suggest nearest hospital", "nearest PHC", "book an appointment", "मुझे पास का PHC बताओ", "क्लिनिक में अपॉइंटमेंट लेना है"), you MUST transfer them to the Clinic & Appointment Specialist using `transfer_to_clinic_specialist`.
+- Tell the user warmly in one sentence that you are transferring them to the Clinic & Appointment Specialist, then call `transfer_to_clinic_specialist`.
 
 DAY 6 MEDICATION REMINDER CALLS (YOU CAN ACTUALLY SET THESE - DO NOT DENY IT)
 - You have tools: `schedule_medicine_reminder`, `list_my_reminders`, `opt_out_of_reminders`.
@@ -218,6 +213,46 @@ CLOSING: deliver the farewell in their language, then call `end_call`.
 - Hindi: "धन्यवाद {name} जी! अपना ख्याल रखिएगा।"
 - English: "Thank you {name}! Please take care of your health."
 """
+
+# ---------------------------------------------------------------------------
+# Day 9 — Clinic & Appointment Specialist
+# ---------------------------------------------------------------------------
+SPECIALIST_PROMPT = """IDENTITY
+You are the Clinic & Appointment Specialist for Aanya Health Services. You are an expert at locating Primary Health Centres (PHC), Community Health Centres (CHC), civil hospitals, and booking clinic appointments for callers.
+
+OBJECTIVES
+1. Find nearby PHCs, CHCs, and government health centers using `lookup_nearest_phc`.
+2. Help callers schedule appointments at nearby clinics using `book_clinic_appointment`.
+3. List existing appointments when asked using `list_my_appointments`.
+4. Maintain strict boundaries: you do NOT give general medical advice, symptom diagnosis, sleep/diet advice, or medication guidance. If a caller asks about symptoms, medical advice, or remedies, you MUST return them to Aanya using `return_to_health_advisor`.
+
+LANGUAGE & ACCENT (STRICT LANGUAGE MATCHING)
+- Detect the language the user is speaking and ALWAYS reply in that EXACT language.
+- IF THE USER SPEAKS IN ENGLISH: Reply in clear, warm, natural English.
+- IF THE USER SPEAKS IN HINDI OR HINGLISH: Respond in pure, natural, conversational Hindi using DEVANAGARI SCRIPT (हिंदी देवनागरी लिपि).
+- HINDI FAREWELL RULE: In Hindi, NEVER say "बाय" or "bye". ALWAYS use "धन्यवाद" or "शुक्रिया" or "अपना ख्याल रखिएगा".
+
+PHC & HEALTH CENTER LOOKUP WORKFLOW:
+- When user asks for nearest PHC / hospital:
+  1. If location is unknown, ask: "आप किस शहर, जिले या स्थान पर हैं?" (Which city, district, or place are you located in?).
+  2. Once location is known, call `lookup_nearest_phc(location=location)`.
+  3. Read out facility name, address, and phone clearly. Mention data source is 2026 National Health Registry / OpenStreetMap.
+
+BOOKING AN APPOINTMENT WORKFLOW:
+- Collect:
+  1. Caller's name (if not already known)
+  2. Phone number (10 digits mobile number)
+  3. Clinic / PHC name
+  4. Preferred Date (e.g. 'Tomorrow', '2026-08-16')
+  5. Preferred Time slot (e.g. '10:00 AM')
+  6. Reason for visit (scrubbed, brief summary)
+- Call `book_clinic_appointment`.
+- After booking, read the reference number (e.g. APT-2001) slowly and clearly digit-by-digit, and confirm the details.
+
+RETURN TO HEALTH ADVISOR:
+- If the user asks for general health advice, symptom triage, diet/sleep tips, home remedies, or medicine reminders, politely explain that you specialize in clinic visits and transfer them back to Aanya using `return_to_health_advisor`.
+"""
+
 
 
 # A reminder call has no reason to run long. This cap protects against a wedged
@@ -419,7 +454,13 @@ def _spoken_reference(reference_id: str, language: str = "Hindi") -> str:
         digits = " ".join(english_digits.get(ch, ch) for ch in number)
         return f"{letters} {digits}".strip()
 
-    hindi_letters = {"H": "एच", "L": "एल", "P": "पी"}
+    hindi_letters = {
+        "H": "एच",
+        "L": "एल",
+        "P": "पी",
+        "A": "ए",
+        "T": "टी",
+    }
     hindi_digits = {
         "0": "शून्य", "1": "एक", "2": "दो", "3": "तीन", "4": "चार",
         "5": "पाँच", "6": "छह", "7": "सात", "8": "आठ", "9": "नौ",
@@ -470,9 +511,40 @@ def build_outbound_opening(call_info: dict) -> str:
     return opening
 
 
-class Assistant(Agent):
-    def __init__(self, instructions: str = SYSTEM_PROMPT) -> None:
-        super().__init__(instructions=instructions)
+class HealthAgentBase(Agent):
+    @function_tool
+    async def end_call(self, context: RunContext) -> str:
+        """Disconnect and end the call after delivering the final farewell statement (e.g. after saying 'धन्यवाद' or 'Thank you').
+
+        Call this tool IMMEDIATELY when delivering the final farewell statement to cut the call and return the user to the landing page.
+        """
+        logger.info("Ending call per LLM request after farewell.")
+
+        async def disconnect_later():
+            await asyncio.sleep(2.5)  # Allow final TTS playout to complete
+            try:
+                if hasattr(context, "session") and context.session:
+                    await context.session.aclose()
+            except Exception as e:
+                logger.warning(f"Error closing session on end_call: {e}")
+            try:
+                if hasattr(context, "room") and context.room:
+                    await context.room.disconnect()
+            except Exception as e:
+                logger.warning(f"Error disconnecting room on end_call: {e}")
+
+        # Keep a reference so the task is not garbage-collected mid-teardown.
+        self._disconnect_task = asyncio.create_task(disconnect_later())
+        return "Call ending sequence initiated. Disconnecting room in 2.5 seconds."
+
+
+class Assistant(HealthAgentBase):
+    def __init__(
+        self,
+        instructions: str = SYSTEM_PROMPT,
+        chat_ctx: Optional[ChatContext] = None,
+    ) -> None:
+        super().__init__(instructions=instructions, chat_ctx=chat_ctx)
 
     @function_tool
     async def lookup_caller(self, context: RunContext, user_id_or_name: str) -> str:
@@ -892,29 +964,74 @@ class Assistant(Agent):
         )
 
     @function_tool
-    async def end_call(self, context: RunContext) -> str:
-        """Disconnect and end the call after delivering the final farewell statement (e.g. after saying 'धन्यवाद' or 'Thank you').
+    async def lookup_emergency_helpline(self, context: RunContext, category: str = "general") -> str:
+        """Look up official government emergency and health helplines (108 Ambulance, 104 Health advice, 14416 Tele-MANAS).
 
-        Call this tool IMMEDIATELY when delivering the final farewell statement to cut the call and return the user to the landing page.
+        Args:
+            category: Type of helpline needed e.g. 'ambulance', 'mental_health', 'maternal', 'general'
         """
-        logger.info("Ending call per LLM request after farewell.")
+        logger.info(f"Looking up emergency helpline for category='{category}'")
+        try:
+            result = health_services.get_emergency_helpline(category=category)
+            return json.dumps(result, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Error looking up helpline: {e}")
+            return json.dumps(
+                {
+                    "status": "error",
+                    "message": "Helpline directory unavailable.",
+                    "fallback_recommendation": "For emergencies, please dial 108 immediately.",
+                },
+                ensure_ascii=False,
+            )
 
-        async def disconnect_later():
-            await asyncio.sleep(2.5)  # Allow final TTS playout to complete
-            try:
-                if hasattr(context, "session") and context.session:
-                    await context.session.aclose()
-            except Exception as e:
-                logger.warning(f"Error closing session on end_call: {e}")
-            try:
-                if hasattr(context, "room") and context.room:
-                    await context.room.disconnect()
-            except Exception as e:
-                logger.warning(f"Error disconnecting room on end_call: {e}")
+    @function_tool
+    async def transfer_to_clinic_specialist(self, context: RunContext) -> tuple[Agent, str]:
+        """Transfer the call to the Clinic & Appointment Specialist when the user asks for nearest PHC, hospital, clinic lookup, or booking a clinic appointment.
+        """
+        logger.info("Transferring call to ClinicAppointmentSpecialist...")
+        specialist = ClinicAppointmentSpecialist(
+            chat_ctx=self.chat_ctx.copy(exclude_instructions=True)
+        )
+        return (
+            specialist,
+            "Transferring to the Clinic & Appointment Specialist. The specialist will now introduce themselves and assist with PHC lookup and appointment booking.",
+        )
 
-        # Keep a reference so the task is not garbage-collected mid-teardown.
-        self._disconnect_task = asyncio.create_task(disconnect_later())
-        return "Call ending sequence initiated. Disconnecting room in 2.5 seconds."
+
+class ClinicAppointmentSpecialist(HealthAgentBase):
+    def __init__(
+        self,
+        instructions: str = SPECIALIST_PROMPT,
+        chat_ctx: Optional[ChatContext] = None,
+    ) -> None:
+        super().__init__(instructions=instructions, chat_ctx=chat_ctx)
+
+    async def on_enter(self) -> None:
+        """Step 5: Specialist self-introduction upon transfer."""
+        is_english = False
+        if self.chat_ctx:
+            messages = self.chat_ctx.messages() if callable(getattr(self.chat_ctx, "messages", None)) else getattr(self.chat_ctx, "messages", [])
+            for msg in reversed(messages):
+                if msg.role == "user" and isinstance(msg.content, str):
+                    if not any("\u0900" <= c <= "\u097f" for c in msg.content):
+                        is_english = True
+                    break
+
+        if is_english:
+            intro = (
+                "Hello! I am the Clinic and Appointment Specialist. "
+                "I can help you locate nearby Primary Health Centres (PHC) and schedule your appointment. "
+                "How can I help you today?"
+            )
+        else:
+            intro = (
+                "नमस्ते! मैं क्लिनिक और अपॉइंटमेंट विशेषज्ञ हूँ। "
+                "मैं आपको नजदीकी प्राथमिक स्वास्थ्य केंद्र (PHC) खोजने और अपॉइंटमेंट बुक करने में मदद कर सकता हूँ। "
+                "बताइए, मैं आपकी क्या सहायता करूँ?"
+            )
+        if hasattr(self, "session") and self.session:
+            await self.session.say(intro)
 
     @function_tool
     async def lookup_nearest_phc(
@@ -966,26 +1083,98 @@ class Assistant(Agent):
             )
 
     @function_tool
-    async def lookup_emergency_helpline(self, context: RunContext, category: str = "general") -> str:
-        """Look up official government emergency and health helplines (108 Ambulance, 104 Health advice, 14416 Tele-MANAS).
+    async def book_clinic_appointment(
+        self,
+        context: RunContext,
+        clinic_name: str,
+        appointment_date: str,
+        appointment_time: str,
+        reason: str,
+        caller_name: str = "",
+        phone_number: str = "",
+        language: str = "Hindi",
+    ) -> str:
+        """Book an appointment at a Primary Health Centre (PHC), clinic, or hospital.
 
         Args:
-            category: Type of helpline needed e.g. 'ambulance', 'mental_health', 'maternal', 'general'
+            clinic_name: Name of the PHC, clinic, or hospital (e.g. 'Civil Hospital Lucknow', 'PHC Chandanpur')
+            appointment_date: Preferred date for appointment (e.g. 'Tomorrow', '2026-08-16')
+            appointment_time: Preferred time slot (e.g. '10:00 AM', '14:30')
+            reason: Reason for visit / health concern (e.g. 'Blood pressure checkup', 'Routine dental checkup')
+            caller_name: Name of caller. Leave empty if already known from conversation.
+            phone_number: 10-digit mobile number for confirmation.
+            language: Spoken language ('Hindi' or 'English').
         """
-        logger.info(f"Looking up emergency helpline for category='{category}'")
-        try:
-            result = health_services.get_emergency_helpline(category=category)
-            return json.dumps(result, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"Error looking up helpline: {e}")
-            return json.dumps(
-                {
-                    "status": "error",
-                    "message": "Helpline directory unavailable.",
-                    "fallback_recommendation": "For emergencies, please dial 108 immediately.",
-                },
-                ensure_ascii=False,
+        userdata: dict = {}
+        if hasattr(context, "session") and hasattr(context.session, "userdata"):
+            userdata = context.session.userdata or {}
+
+        name = (caller_name or "").strip()
+        number = _normalize_phone_e164(phone_number or userdata.get("phone_number", ""))
+
+        # Fall back to saved caller memory
+        record = db.get_caller_memory(name or userdata.get("phone_number", "") or "")
+        if record:
+            name = name or (record.get("name") or "")
+            number = number or _normalize_phone_e164(record.get("phone_number", ""))
+
+        if not name:
+            return (
+                "Caller name is missing. Ask the caller for their name before booking the appointment."
             )
+
+        if not number:
+            return (
+                "Phone number is missing. Ask the caller for their 10-digit mobile number so we can confirm their appointment."
+            )
+
+        lang = "English" if (language or "").strip().lower().startswith("en") else "Hindi"
+
+        row = appointments.book_appointment(
+            caller_name=name,
+            phone_number=number,
+            clinic_name=clinic_name,
+            appointment_date=appointment_date,
+            appointment_time=appointment_time,
+            reason=reason,
+        )
+
+        if not row:
+            return (
+                "Failed to book appointment due to missing information. Please re-check the details with the caller."
+            )
+
+        spoken = _spoken_reference(row["reference_id"], lang)
+        return (
+            f"Appointment {row['reference_id']} confirmed for {name} at {clinic_name} "
+            f"on {appointment_date} at {appointment_time}. Now in {lang}: read out the reference "
+            f'number slowly as "{spoken}", confirm the date, time and clinic, and ask them to arrive 10 minutes early.'
+        )
+
+    @function_tool
+    async def list_my_appointments(self, context: RunContext, limit: int = 5) -> str:
+        """List recent clinic appointments."""
+        rows = appointments.list_appointments(limit=limit)
+        if not rows:
+            return "No clinic appointments found."
+        items = [
+            f"- {r['reference_id']}: {r['clinic_name']} on {r['appointment_date']} at {r['appointment_time']} for {r['caller_name']} ({r['reason']})"
+            for r in rows
+        ]
+        return "Recent appointments:\n" + "\n".join(items)
+
+    @function_tool
+    async def return_to_health_advisor(self, context: RunContext) -> tuple[Agent, str]:
+        """Transfer caller back to Aanya, the main Health Advisor, for symptom guidance, wellness advice, diet, sleep, or medicine reminders.
+        """
+        logger.info("Transferring caller back to Assistant (Aanya)...")
+        assistant = Assistant(
+            chat_ctx=self.chat_ctx.copy(exclude_instructions=True)
+        )
+        return (
+            assistant,
+            "Transferring back to Aanya Health Advisor. Aanya will now continue assisting with health questions and advice.",
+        )
 
 
 server = AgentServer(

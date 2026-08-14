@@ -152,6 +152,31 @@ def ensure_db_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_call_analytics_created ON call_analytics (created_at)"
     )
 
+    # ---------------------------------------------------------------------
+    # Day 9 — Clinic & PHC Appointments (Specialist Handoff)
+    # ---------------------------------------------------------------------
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS clinic_appointments (
+            appointment_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            reference_id     TEXT NOT NULL DEFAULT '',
+            caller_name      TEXT NOT NULL,
+            phone_number     TEXT NOT NULL,
+            clinic_name      TEXT NOT NULL,
+            appointment_date TEXT NOT NULL,
+            appointment_time TEXT NOT NULL,
+            reason           TEXT NOT NULL,
+            created_at       TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_appointments_ref ON clinic_appointments (reference_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_appointments_created ON clinic_appointments (created_at)"
+    )
+
 
 def init_db(db_path: Optional[Path] = None) -> None:
     """Initialize the SQLite table for storing caller memory with phone and IP address support."""
