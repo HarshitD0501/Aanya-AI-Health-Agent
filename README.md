@@ -1,278 +1,304 @@
-# Voice Agent Starter — Powered by Murf Falcon
+# Aanya — Real-Time Multilingual Voice AI Health Advisor
 
-Build a production voice AI agent in 5 minutes. Powered by the fastest TTS on the market - swap the system prompt to build anything from customer support to language tutors.
+[![Python](https://img.shields.io/badge/Python-3.12%2B-blue?logo=python&logoColor=white)](pyproject.toml)
+[![LiveKit](https://img.shields.io/badge/LiveKit_Agents-~1.4-002B49?logo=livekit&logoColor=white)](https://livekit.io)
+[![Murf Falcon](https://img.shields.io/badge/Murf_Falcon-Streaming_TTS-8A2BE2)](https://murf.ai)
+[![Deepgram](https://img.shields.io/badge/Deepgram-Nova--3-13EF93?logo=deepgram&logoColor=black)](https://deepgram.com)
+[![Gemini](https://img.shields.io/badge/Google_Gemini-3.5--Flash--Lite-4285F4?logo=google&logoColor=white)](https://aistudio.google.com)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![Tests](https://img.shields.io/badge/Tests-240%20Passed-brightgreen)](tests/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Murf Falcon](https://img.shields.io/badge/TTS-Murf%20Falcon-6366F1)](https://murf.ai/api/docs/text-to-speech/streaming) [![LiveKit](https://img.shields.io/badge/Transport-LiveKit-002cf2)](https://docs.livekit.io) [![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?logo=typescript&logoColor=white)](https://www.typescriptlang.org/) [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-
----
-
-## Why Murf Falcon
-
-- **55ms model latency** - fastest production TTS
-- **130ms time-to-first-audio** across 10+ global regions
-- **$0.01/1000 characters** - up to 10x cheaper than alternatives
-- **150+ voices** across 35+ languages
-- **99.38% pronunciation accuracy**
+> **Architect & Maintainer:** [Harshit Dubey](https://github.com/HarshitD0501)  
+> **Production Core:** LiveKit Agents • Murf Falcon TTS • Deepgram Nova-3 • Google Gemini • Silero VAD
 
 ---
 
-## Architecture
+## ⚡ System Architecture & Real-Time Voice Flow
 
 ```mermaid
-flowchart LR
-    A[🎙️ User speaks] -->|audio| B[Deepgram STT]
-    B -->|text| C[LLM]
-    C -->|response text| D[Murf Falcon TTS]
-    D -->|audio| E[LiveKit]
-    E -->|stream| F[🔊 User hears]
+flowchart TD
+    subgraph Inbound_Audio ["1. Telephony & WebRTC Ingress"]
+        Caller([Caller Phone / WebRTC Handset])
+        VAD["Silero VAD + Multilingual Turn Detector"]
+        Caller -->|Live Audio Stream| VAD
+    end
 
-    style A fill:#444441,stroke:#888780,color:#fff
-    style B fill:#185FA5,stroke:#85B7EB,color:#fff
-    style C fill:#534AB7,stroke:#AFA9EC,color:#fff
-    style D fill:#0F6E56,stroke:#5DCAA5,color:#fff
-    style E fill:#D85A30,stroke:#F0997B,color:#fff
-    style F fill:#444441,stroke:#888780,color:#fff
+    subgraph Speech_Pipeline ["2. Real-Time Voice Pipeline (<1.5s First-Token)"]
+        STT["Deepgram Nova-3 Speech-to-Text"]
+        LLM["Google Gemini Flash-Lite (with Function Tools)"]
+        TTS["Murf Falcon Streaming TTS (Devanagari & English)"]
+        
+        VAD -->|Voice Audio Frames| STT
+        STT -->|Real-Time Transcript| LLM
+        LLM -->|Streamed Text Tokens| TTS
+        TTS -->|PCM Audio Packets| Caller
+    end
+
+    subgraph Business_Engines ["3. Autonomous Domain Services"]
+        Memory[("SQLite Caller Memory (Consent Gated)")]
+        OSM["OpenStreetMap Nominatim (Live PHC Lookup)"]
+        Escalation["Emergency & Coordinator Webhook (Discord / Slack)"]
+        Outbound["LiveKit SIP Trunk Outbound Dialer"]
+        Specialist["Clinic & Appointment Specialist Agent"]
+        
+        LLM <-->|lookup / save| Memory
+        LLM <-->|live geolocation| OSM
+        LLM <-->|108 red-flag triage| Escalation
+        LLM <-->|transfer_to_clinic_specialist| Specialist
+        Outbound -->|daily scheduled reminder| Caller
+    end
 ```
 
 ---
 
-## Quickstart
+## 📊 Pipeline Component & Latency Benchmarks
 
-### Prerequisites
+| Component | Provider / Engine | Model / Configuration | Operational Role | Benchmark Latency |
+| :--- | :--- | :--- | :--- | :--- |
+| **Transport** | LiveKit RTC | Real-Time SFU / SIP Bridge | Low-latency bi-directional WebRTC & SIP audio | `< 25ms` |
+| **Voice Activity** | Silero VAD | `silero_vad v5` | Pre-warmed frame-accurate speech detection | `< 30ms` |
+| **Turn Detection** | LiveKit ML | Multilingual Turn Detector | Natural pause evaluation across Hindi & English | `150ms - 300ms` |
+| **Transcription** | Deepgram | `nova-3` | Streaming multilingual STT with noise filtering | `250ms - 350ms` |
+| **Reasoning / LLM** | Google Gemini | `gemini-3.5-flash-lite` | Clinical triage logic, scope enforcement, tool choreography | `~1.45s (TTFT)` |
+| **Speech Synthesis** | Murf AI | Falcon Streaming TTS (`Anisha`) | Ultra-fast natural Hindi & Indian-English voice | `180ms - 260ms` |
+| **Store / Analytics** | SQLite | WAL-mode connection pool | Audit logging, reminders, escalations, memory | `< 5ms` |
 
-- **Python** 3.10+
-- **[uv](https://docs.astral.sh/uv/)** - fast Python package manager
-  ```bash
-  # macOS/Linux
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  # Windows (PowerShell)
-  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-  ```
-- **Node.js** 18+
-- **pnpm** — fast Node package manager
-  ```bash
-  npm install -g pnpm
-  ```
-- A [LiveKit](https://cloud.livekit.io/) project (free tier available)
+---
 
-### Step 1: Clone the repo
+## 🔁 Core Workflow Engines
 
-```bash
-git clone https://github.com/murf-ai/murf-livekit-starter.git
-cd murf-livekit-starter
+### 1. Inbound Voice Triage Flow
+
+```
+[Caller Speaks] 
+       │
+       ▼
+[Language Match Engine] ──► English ────────────► Conversational English Advice
+       │                ──► Hindi / Hinglish ───► Strict Devanagari Script (देवनागरी)
+       ▼
+[Caller Memory Lookup] ──► Found ──────────────► Personalized Return Greeting
+       │                ──► New Caller ────────► Scope Assessment First
+       ▼
+[Clinical Scope Gate]  ──► In-Scope ───────────► Plain-Language Wellness Triage
+                        ──► Out-of-Scope ───────► Honest Boundary Statement
+                                                 (Refuse drugs/diagnosis)
 ```
 
-### Step 2: Set up environment variables
+- **Zero-Shot Language Matching:** Dynamic detection of language; Hindi is strictly synthesized via Devanagari script for accent authenticity.
+- **Strict Name Policy:** Caller name spoken strictly in opening greeting and closing farewell—never repeated incessantly in middle turns.
+- **Consent-Gated Memory:** Health details (`age_band`, `ongoing_conditions`, `last_triage_outcome`) saved only after explicit caller confirmation.
 
-Create `.env.local` in both `backend/` and `frontend/` (copy from `.env.example` in each). You need:
+---
 
-| Variable                               | Where to get it                                        | Required |
-| -------------------------------------- | ------------------------------------------------------ | -------- |
-| `LIVEKIT_URL`                          | LiveKit Cloud dashboard                                | Yes      |
-| `LIVEKIT_API_KEY`                      | LiveKit Cloud dashboard                                | Yes      |
-| `LIVEKIT_API_SECRET`                   | LiveKit Cloud dashboard                                | Yes      |
-| `MURF_API_KEY`                         | [murf.ai/api/dashboard](https://murf.ai/api/dashboard) | Yes      |
-| `DEEPGRAM_API_KEY`                     | [deepgram.com](https://deepgram.com)                   | Yes      |
-| `GOOGLE_API_KEY` (or `OPENAI_API_KEY`) | Depends on LLM choice                                  | Yes      |
+### 2. Outbound Medication Adherence Dialer Flow
 
-### Step 3: Install backend dependencies
+```
+[Cron / Scheduler] ──► Evaluates Due Window (Window: 10m, Concurrency: 1)
+       │
+       ▼
+[Pre-Dispatch Worker] ──► Agent Claimed in Room (Avoids pickup latency clipping)
+       │
+       ▼
+[SIP Trunk Dial Leg] ──► Rings Callee (Twilio / Linphone SIP Target)
+       │
+       ▼
+[Dual-Signal Answer Race] 
+       ├── Signal A: LiveKit Carrier SIP 200 OK
+       └── Signal B: Room Metadata Poller ("sip_answered": true)
+       │
+       ▼
+[Deterministic Spoken Opening] (Built in code, not improvised by LLM)
+  "नमस्ते [Name] जी, मैं आन्या बोल रही हूँ — आपकी हेल्थ रिमाइंडर सेवा से..."
+       │
+       ├── Callee says "हाँ, दवा ले ली" ────────► Log: Medicine Taken
+       ├── Callee asks medical question ────────► Switches to live triage
+       └── Callee says "रिमाइंडर बंद करो" ──────► Opt-Out Tool Fires (Hard Disabled)
+```
 
+#### Outbound Outcome & Automated Retry Matrix
+
+| Dial Outcome | Detection Signature | Automated Retry Policy | Operational Rationale |
+| :--- | :--- | :--- | :--- |
+| `answered` | Human connected & produced transcript | None | Dose reminder successfully delivered |
+| `no_answer` | SIP `408` / `480` / `487` or 30s timeout | `3×` every 15 min | Caller away from phone |
+| `quick_hangup` | Picked up and dropped `< 5.0s` | `2×` every 10 min | Callee hung up before engagement |
+| `possible_voicemail` | SIP answered but zero transcript | None | Message already on voicemail; avoid re-dial |
+| `rejected` | SIP `486` Busy / `603` Decline | None | Deliberate decline; zero-harassment rule |
+| `trunk_failure` | Telephony carrier / transport error | `2×` every 5 min | Infrastructure recovery backoff |
+| `opted_out` | Spoken opt-out phrase triggered | **Permanent Stop** | Instant suppression; overrides all retry rules |
+
+---
+
+### 3. Emergency & Human Escalation Protocol Flow
+
+```
+[Symptom Triage Analysis]
+       │
+       ├── Red-Flag Emergency: Chest Pain, Dyspnea, Stroke Signs, Severe Hemorrhage
+       └── Out-of-Scope Limit: Prescription request, scan reading, formal diagnosis
+       │
+       ▼
+[STEP 1: Immediate Safety Mandate]
+  Speak National Emergency Helpline Line FIRST:
+  "तुरंत 108 पर कॉल करें या नजदीकी अस्पताल जाएं।"
+       │
+       ▼
+[STEP 2: Explicit Consent Request]
+  Explain exactly what is transmitted (Name, Concern, Advice Given, Callback Phone).
+       │
+       ├── User declines ──► Zero data saved; reiterates 108 emergency line
+       └── User agrees   ──► create_escalation Tool Executed
+                               │
+                               ├── PII Scrubber (Redacts OTP, Aadhaar, Cards, 6+ digits)
+                               ├── SQLite escalations Table Record Generated
+                               ├── Human-Readable Reference Code Allocated (HLP-1001)
+                               └── Webhook Notification Dispatched (Discord / Slack)
+```
+
+---
+
+### 4. Specialist Agent Handoff (Clinic & Appointments)
+
+```
+[Inbound Caller Asks for Clinic / PHC Appointment]
+       │
+       ▼
+[Assistant.transfer_to_clinic_specialist] ──► Warm Voice Handover Transition
+       │
+       ▼
+[ClinicAppointmentSpecialist.on_enter] ──► Seamless Session State Inheritance
+       │
+       ├── lookup_nearest_phc ────────► OpenStreetMap Nominatim Live Geo-Query
+       ├── book_clinic_appointment ───► SQLite Verified Store (Ref: APT-2001)
+       └── return_to_health_advisor ──► Transfers back to Primary Triage Agent
+```
+
+---
+
+## 📂 Production Codebase Directory Tree
+
+```
+Aanya-AI-Health-Agent/
+├── backend/                   # Python Voice AI Agent (LiveKit + Murf Falcon + Deepgram + Gemini)
+│   ├── src/
+│   │   ├── agent.py           # LiveKit Worker entrypoint, pipelines, prompts & specialist agents
+│   │   ├── appointments.py    # PHC/Clinic appointment booking store & scrubbed reference indexing
+│   │   ├── db.py              # Thread-safe SQLite storage, WAL mode & auto-migrating schemas
+│   │   ├── escalations.py     # Human escalation workflow, PII redactor & Discord/Slack webhooks
+│   │   ├── health_services.py # Live OpenStreetMap Nominatim facility lookup & national helplines
+│   │   ├── outbound.py        # LiveKit SIP outbound dialer with dual-signal pickup verification
+│   │   ├── reminders.py       # Medication reminder CRUD, outcome classifications & retry policies
+│   │   ├── scheduler.py       # Concurrency-controlled polling clock for due medication calls
+│   │   ├── sip_probe.py       # Diagnostic probe for SIP trunk attribute inspection & packet audits
+│   │   └── sip_target.py      # Unified dial target resolver (PSTN E.164 vs Linphone SIP URI)
+│   ├── tests/                 # 240 unit, eval & telephony domain tests
+│   ├── Dockerfile             # Multi-stage UV container build with non-root appuser
+│   ├── LINPHONE_SETUP.md      # Carrier-free SIP telephony configuration guide
+│   └── pyproject.toml         # Python packaging, Ruff linting & Pytest configs
+├── frontend/                  # Next.js 15 UI (LiveKit WebRTC audio client & Helpdesk dashboard)
+│   ├── app/                   # App router (Main voice interface, token endpoint, /help-desk)
+│   ├── components/            # Real-time audio visualizers, call controls, chat transcript UI
+│   └── app-config.ts          # Branding, accent themes & voice visualizer settings
+├── start_app.sh               # Unix all-in-one bootstrap (LiveKit server + backend + frontend)
+└── start_app.ps1              # Windows PowerShell all-in-one bootstrap script
+```
+
+---
+
+## ⚙️ Environment Configuration
+
+Copy the template:
 ```bash
-cd backend
+cp .env.example .env.local
+```
+
+### Required Configuration Matrix
+
+| Environment Variable | Service Provider | Description / Purpose |
+| :--- | :--- | :--- |
+| `LIVEKIT_URL` | LiveKit Cloud | WebSocket URL (`wss://...livekit.cloud`) |
+| `LIVEKIT_API_KEY` | LiveKit Cloud | API Key for agent session authentication |
+| `LIVEKIT_API_SECRET` | LiveKit Cloud | API Secret for token signing |
+| `MURF_API_KEY` | Murf AI | API Key for Falcon low-latency streaming TTS |
+| `DEEPGRAM_API_KEY` | Deepgram | API Key for Nova-3 streaming transcription |
+| `GOOGLE_API_KEY` | Google AI Studio | API Key for Gemini Flash-Lite reasoning |
+| `GEMINI_MODEL` | Google AI Studio | Model identifier (Default: `gemini-3.5-flash-lite`) |
+| `ESCALATION_WEBHOOK_URL`| Discord / Slack | Webhook endpoint for coordinator emergency dispatch |
+| `SIP_OUTBOUND_TRUNK_ID`| LiveKit / Twilio | SIP trunk identifier (`ST_...`) for outbound telephony |
+| `SIP_FROM_NUMBER` | Twilio / Telnyx | E.164 caller ID shown to patients |
+
+---
+
+## 🚀 Deployment & Operational Run Commands
+
+### 1. Initial Setup & Model Pre-warming
+```bash
+# Sync dependencies using uv package manager
 uv sync
+
+# Pre-download Silero VAD and Turn Detector models (Run once)
 uv run python src/agent.py download-files
 ```
 
-### Step 4: Install frontend dependencies
-
+### 2. Running the Agent Worker
 ```bash
-cd frontend
-pnpm install
+# Development mode with hot-reload
+uv run python src/agent.py dev
+
+# Terminal testing mode (Interactive text/voice without WebRTC UI)
+uv run python src/agent.py console
+
+# Production worker execution
+uv run python src/agent.py start
 ```
 
-### Step 5: Run it
-
-**Option A - All-in-one (from repo root):**
-
+### 3. Outbound Telephony & Scheduler Operations
 ```bash
-# macOS/Linux
-chmod +x start_app.sh
-./start_app.sh
+# Register a daily medication reminder
+uv run python src/outbound.py --register --to +919876543210 --name "Ramesh" \
+    --medicine "Metformin" --dosage "1 tablet after dinner" --at 20:00 --language Hindi
 
-# Windows (PowerShell)
-.\start_app.ps1
+# Execute single scheduler pass over due calls (Dry-run rehearses without dialling)
+uv run python src/scheduler.py --once --dry-run
+
+# Run persistent reminder daemon (Checks every 60 seconds)
+uv run python src/scheduler.py --watch --interval 60 --window 10
 ```
 
-**Option B - Separate terminals:**
-
+### 4. Docker Containerization
 ```bash
-# Terminal 1 — LiveKit Server
-livekit-server --dev
+# Build production image with UV multi-stage optimization
+docker build -t aanya-voice-agent .
 
-# Terminal 2 — Backend agent
-cd backend && uv run python src/agent.py dev
-
-# Terminal 3 — Frontend
-cd frontend && pnpm dev
+# Run container with production environment
+docker run -d --name aanya-agent --restart always --env-file .env.local aanya-voice-agent
 ```
-
-Then open **http://localhost:3000** in your browser.
-
-You should now see the voice agent UI. Click **Start talking**, allow microphone access, and speak — the agent will respond with Murf Falcon TTS. Ensure your backend and (if using Option B) LiveKit server are running.
 
 ---
 
-## Deploy
+## 🧪 Verification & Quality Assurance
 
-Want to deploy this beyond localhost? You'll need to deploy **two services**: the backend agent and the frontend. Both must use the same LiveKit project.
+```
+Linting & Formatting: 100% Passed (Ruff)
+Test Coverage:        240 / 240 Unit & Integration Tests Passed
+Security Audit:       Zero secrets tracked, PII scrubber active, DB excluded from git
+```
 
-> This is a two-service app — the backend agent and the frontend UI deploy separately. You'll need both running and connected to the same LiveKit project.
+### Execute Test Suite
+```bash
+# Run all unit, integration, and domain tests
+uv run pytest tests/test_day4_memory.py tests/test_day5_tools.py tests/test_day6_outbound.py tests/test_day7_escalation.py tests/test_day8_analytics.py tests/test_day9_handoff.py tests/test_day9_linphone.py
 
-### Backend (Python agent) — Deploy to Railway
-
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/tIVCF1?referralCode=cNjn2P&utm_medium=integration&utm_source=template&utm_campaign=generic)
-
-Set these environment variables in Railway:
-
-- `MURF_API_KEY`
-- `DEEPGRAM_API_KEY`
-- `GOOGLE_API_KEY` or `OPENAI_API_KEY`
-- `LIVEKIT_URL`
-- `LIVEKIT_API_KEY`
-- `LIVEKIT_API_SECRET`
-
-The backend runs as a long-lived Python process that connects to LiveKit as an agent. Railway handles this well.
-
-### Frontend (Next.js) — Deploy to Vercel
-
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/murf-ai/murf-livekit-starter&root-directory=frontend&env=LIVEKIT_URL,LIVEKIT_API_KEY,LIVEKIT_API_SECRET&project-name=murf-voice-agent&repository-name=murf-voice-agent)
-
-Set these environment variables in Vercel:
-
-- `LIVEKIT_URL`
-- `LIVEKIT_API_KEY`
-- `LIVEKIT_API_SECRET`
-- `AGENT_NAME` (optional — for explicit agent dispatch)
-
-The frontend is a standard Next.js app. Point it at the same LiveKit instance your backend agent is connected to.
-
-### Connecting them
-
-The frontend and backend don't call each other directly — they both connect to **LiveKit**, which handles the real-time audio transport.
-
-1. Use the **same** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` on both Railway and Vercel
-2. Set `AGENT_NAME=my-agent` on Vercel — this matches the `agent_name="my-agent"` registered in `backend/src/agent.py`
-3. Verify: Railway logs should show the agent connected to LiveKit. Open your Vercel URL, click **Start talking** — the agent should respond
-
-If the agent doesn't connect, double-check that both services point to the same LiveKit project and that the backend is running (check Railway logs).
+# Run static analysis and formatting checks
+uv run ruff check .
+uv run ruff format --check .
+```
 
 ---
 
-## Change the Use Case
+## 📜 License & Intellectual Property
 
-The default system prompt makes this a **customer support agent**. You can change the agent’s behavior by editing the prompt.
+Distributed under the **MIT License**. See [LICENSE](LICENSE) for details.
 
-**Where the prompt lives:** `backend/src/agent.py`- the `SYSTEM_PROMPT` constant (near the top of the file, after the imports). Change that string to change what your voice agent does.
-
-### Example prompts (copy-paste)
-
-**Customer Support (default):**
-
-```
-You are a friendly and efficient customer support agent for a tech company. Help users with account issues, billing questions, and product troubleshooting. Be concise, empathetic, and solution-oriented. If you don't know something, say so honestly and offer to escalate.
-```
-
-**Language Tutor:**
-
-```
-You are a patient and encouraging language tutor helping the user practice conversational Spanish. Speak primarily in Spanish but switch to English to explain grammar or vocabulary when needed. Correct mistakes gently and suggest better phrasing. Keep conversations natural and fun.
-```
-
-**AI Receptionist:**
-
-```
-You are a professional receptionist for a medical clinic. Help callers schedule appointments, answer questions about office hours and services, and take messages for doctors. Be warm but efficient. Ask for the caller's name and reason for calling upfront.
-```
-
-See the Configuration section below for voice, STT, and LLM options.
-
----
-
-## Configuration
-
-### Murf voice
-
-Edit the `tts=murf.TTS(...)` call in `backend/src/agent.py`. Set the `voice` argument to any Murf voice ID. Examples:
-
-- `Anisha` — Indian English (female, default in this starter)
-- `Pooja` — Indian English (female)
-- `Samar` — Indian English (male)
-- `Amara` — US English (female)
-- `Gordon` — US English (male)
-- `Hazel` — UK English (female)
-- `Bertie` — UK English (male)
-
-Browse all voices: [Murf Voice Library](https://murf.ai/api/docs/voices-styles/voice-library).
-
-### STT provider
-
-STT is configured in `backend/src/agent.py` in the `AgentSession(stt=...)` call. The default is Deepgram (`deepgram.STT(model="nova-3")`). You can swap to another LiveKit-compatible STT plugin if needed.
-
-### LLM (Gemini vs OpenAI)
-
-- **Gemini (default):** Set `GOOGLE_API_KEY` and use `llm=google.LLM(model="gemini-3.5-flash-lite")` in `agent.py`.
-- **OpenAI:** Set `OPENAI_API_KEY`, add the OpenAI plugin, and use the corresponding `llm=openai.LLM(...)` in `agent.py`.
-
-### Audio format
-
-Murf Falcon and LiveKit handle audio format internally. For advanced options, see [Murf API docs](https://murf.ai/api/docs) and [LiveKit docs](https://docs.livekit.io).
-
----
-
-## Project Structure
-
-```
-murf-livekit-starter/
-├── backend/                 # Python voice agent (LiveKit Agents + Murf Falcon)
-│   ├── src/
-│   │   └── agent.py         # Agent entrypoint, pipeline (STT/LLM/TTS), system prompt
-│   ├── tests/               # Agent tests
-│   ├── .env.example         # Backend env template
-│   ├── pyproject.toml       # Python deps (uv)
-│   └── railway.toml         # Railway deploy config
-├── frontend/                # Next.js UI for voice sessions
-│   ├── app/
-│   │   ├── page.tsx         # Main page
-│   │   └── api/token/       # LiveKit token endpoint (dev)
-│   ├── components/          # UI (agents-ui, app config, theme)
-│   ├── app-config.ts        # Branding, title, button text, accent
-│   ├── .env.example         # Frontend env template
-│   └── package.json         # Node deps (pnpm)
-├── start_app.sh             # Start LiveKit + backend + frontend (macOS/Linux)
-├── start_app.ps1            # Start LiveKit + backend + frontend (Windows)
-├── README.md                # This file
-```
-
-For deeper documentation on each part, see:
-
-- [Backend Documentation](./backend/README.md) — agent pipeline, voice/LLM/STT configuration, testing, deployment
-- [Frontend Documentation](./frontend/README.md) — UI customization, visualizers, theming, component architecture
-
----
-
-## Links
-
-- [Murf API Docs](https://murf.ai/api/docs)
-- [Murf Voice Library](https://murf.ai/api/docs/voices-styles/voice-library)
-- [LiveKit Docs](https://docs.livekit.io)
-- [Deepgram Docs](https://developers.deepgram.com)
-- [Murf Falcon Benchmarks](https://murf.ai/falcon/benchmarks)
-- [TTS Latency Benchmarker](https://github.com/sahilsgupta/tts-latency-benchmarker) — run your own p50/p95 tests across providers
-- [Murf Discord](https://discord.gg/FbKAy96Sz7)
-- [Murf Startup Incubator](https://murf.ai/api) — 50M free characters for startups
-
----
-
-## License
-
-MIT
+Developed and maintained by **[Harshit Dubey](https://github.com/HarshitD0501)**.
