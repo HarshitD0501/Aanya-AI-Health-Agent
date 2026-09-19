@@ -37,12 +37,14 @@ def ensure_db_schema(conn: sqlite3.Connection) -> None:
     cursor.execute("PRAGMA table_info(caller_memory)")
     columns = [column[1] for column in cursor.fetchall()]
     if "phone_number" not in columns:
-        conn.execute("ALTER TABLE caller_memory ADD COLUMN phone_number TEXT DEFAULT ''")
+        conn.execute(
+            "ALTER TABLE caller_memory ADD COLUMN phone_number TEXT DEFAULT ''"
+        )
     if "ip_address" not in columns:
         conn.execute("ALTER TABLE caller_memory ADD COLUMN ip_address TEXT DEFAULT ''")
 
     # ---------------------------------------------------------------------
-    # Day 6 — Outbound medication reminder calls
+    # Outbound medication reminder calls
     # ---------------------------------------------------------------------
     conn.execute(
         """
@@ -132,7 +134,7 @@ def ensure_db_schema(conn: sqlite3.Connection) -> None:
         )
 
     # ---------------------------------------------------------------------
-    # Day 8 — Call Analytics Dashboard Logging
+    # Call Analytics & Observability Logging
     # ---------------------------------------------------------------------
     conn.execute(
         """
@@ -153,7 +155,7 @@ def ensure_db_schema(conn: sqlite3.Connection) -> None:
     )
 
     # ---------------------------------------------------------------------
-    # Day 9 — Clinic & PHC Appointments (Specialist Handoff)
+    # Clinic & PHC Appointments
     # ---------------------------------------------------------------------
     conn.execute(
         """
@@ -187,7 +189,9 @@ def init_db(db_path: Optional[Path] = None) -> None:
     logger.info("SQLite database initialized with phone_number & ip_address support.")
 
 
-def get_caller_memory(query: str, db_path: Optional[Path] = None) -> Optional[dict[str, Any]]:
+def get_caller_memory(
+    query: str, db_path: Optional[Path] = None
+) -> Optional[dict[str, Any]]:
     """Retrieve caller memory by user_id, phone_number, ip_address, or name (case-insensitive)."""
     if not query or not query.strip():
         return None
@@ -228,7 +232,9 @@ def get_caller_memory(query: str, db_path: Optional[Path] = None) -> Optional[di
     }
 
 
-def get_latest_caller_memory(db_path: Optional[Path] = None) -> Optional[dict[str, Any]]:
+def get_latest_caller_memory(
+    db_path: Optional[Path] = None,
+) -> Optional[dict[str, Any]]:
     """Retrieve the most recent valid caller memory record from SQLite."""
     init_db(db_path)
     conn = get_connection(db_path)
@@ -286,7 +292,9 @@ def save_caller_memory(
     clean_ip = ip_address.strip()
 
     # Merge with existing caller facts if present
-    existing = get_caller_memory(clean_user_id, db_path=db_path) or get_caller_memory(clean_name, db_path=db_path)
+    existing = get_caller_memory(clean_user_id, db_path=db_path) or get_caller_memory(
+        clean_name, db_path=db_path
+    )
     new_facts = facts or {}
     if existing and existing.get("facts"):
         merged_facts = existing["facts"].copy()
@@ -311,10 +319,21 @@ def save_caller_memory(
                 last_interaction=excluded.last_interaction,
                 consent_given=excluded.consent_given
             """,
-            (clean_user_id, clean_name, clean_phone, clean_ip, language_preference, facts_json, now_iso, 1 if consent_given else 0),
+            (
+                clean_user_id,
+                clean_name,
+                clean_phone,
+                clean_ip,
+                language_preference,
+                facts_json,
+                now_iso,
+                1 if consent_given else 0,
+            ),
         )
     conn.close()
-    logger.info(f"Successfully saved caller memory for user_id='{clean_user_id}', name='{clean_name}', phone='{clean_phone}', ip='{clean_ip}'.")
+    logger.info(
+        f"Successfully saved caller memory for user_id='{clean_user_id}', name='{clean_name}', phone='{clean_phone}', ip='{clean_ip}'."
+    )
     return True
 
 
@@ -335,7 +354,9 @@ def delete_caller_memory(query: str, db_path: Optional[Path] = None) -> bool:
         )
         rows_affected = cursor.rowcount
     conn.close()
-    logger.info(f"Deleted caller memory for query='{clean_query}', rows affected: {rows_affected}.")
+    logger.info(
+        f"Deleted caller memory for query='{clean_query}', rows affected: {rows_affected}."
+    )
     return rows_affected > 0
 
 
@@ -363,7 +384,7 @@ def record_call_analytics(
     duration_sec: float = 0.0,
     db_path: Optional[Path] = None,
 ) -> bool:
-    """Record the outcome of a call in SQLite for the Day 8 Analytics Dashboard."""
+    """Record the outcome of a call in SQLite for analytics and reporting."""
     init_db(db_path)
     now_iso = datetime.now(timezone.utc).isoformat()
     masked_id = mask_identifier(caller_identifier)
@@ -430,4 +451,3 @@ def get_call_analytics_summary(db_path: Optional[Path] = None) -> dict[str, Any]
         "success_rate": f"{success_rate}%",
         "recent_calls": rows,
     }
-

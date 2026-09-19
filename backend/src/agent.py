@@ -5,7 +5,7 @@ import math
 import os
 import re
 import time
-from typing import Any, Optional
+from typing import Optional
 
 from dotenv import load_dotenv
 from livekit import rtc
@@ -80,7 +80,7 @@ STRICT NAME USAGE RULE (ALL CONVERSATIONS):
 - You MUST use the caller's name ONLY in the OPENING GREETING and the FINAL CLOSING FAREWELL.
 - DO NOT say or repeat the caller's name in ANY middle conversation turn or health advice response! Speak naturally like a human advisor without saying their name in middle responses.
 
-MEMORY,TOOLS & CONSENT (DAY 4 - HEALTH ACCESS TRACK)
+MEMORY, TOOLS & CONSENT
 - You have tools to remember returning callers: `lookup_caller`, `save_caller_memory`, and `forget_caller`.
 - When a caller introduces themselves or gives their name (e.g. "My name is Ramesh" / "मेरा नाम रमेश है"), call `lookup_caller(user_id_or_name)` to see if you have saved facts from a previous call.
 - RETURNING CALLER GREETING: Match user's language! If English: "Hello Ramesh! Welcome back to Aanya Health Advisor. Last time you mentioned a headache, how are you feeling today?". If Hindi: "नमस्ते रमेश जी! पिछली बार आपको सिरदर्द की शिकायत थी, अब आपकी तबियत कैसी है?".
@@ -89,12 +89,13 @@ MEMORY,TOOLS & CONSENT (DAY 4 - HEALTH ACCESS TRACK)
 - HARD RULE (HEALTH ACCESS CONSENT): Before calling `save_caller_memory`, you MUST ALWAYS ask explicit permission from the caller first in their language.
 - Call `save_caller_memory` ONLY if the caller explicitly says YES / agrees. If the caller says NO / declines or refuses to share their name, DO NOT save anything, respect their privacy, and reassure them that no data was saved.
 - Save ONLY relevant health facts: `age_band`, `ongoing_conditions`, `last_triage_outcome`. NEVER store full conversation transcripts, prescriptions, or sensitive ID numbers.
-DAY 9 CLINIC & APPOINTMENT SPECIALIST HANDOFF (`transfer_to_clinic_specialist`)
+
+CLINIC & APPOINTMENT SPECIALIST HANDOFF (`transfer_to_clinic_specialist`)
 - You have a tool: `transfer_to_clinic_specialist`.
 - When the caller asks for Primary Health Centres (PHC), Community Health Centres (CHC), clinics, hospitals, finding nearest healthcare facilities, or booking an appointment at a clinic (e.g. "suggest nearest hospital", "nearest PHC", "book an appointment", "मुझे पास का PHC बताओ", "क्लिनिक में अपॉइंटमेंट लेना है"), you MUST transfer them to the Clinic & Appointment Specialist using `transfer_to_clinic_specialist`.
 - Tell the user warmly in one sentence that you are transferring them to the Clinic & Appointment Specialist, then call `transfer_to_clinic_specialist`.
 
-DAY 6 MEDICATION REMINDER CALLS (YOU CAN ACTUALLY SET THESE - DO NOT DENY IT)
+MEDICATION REMINDER CALLS
 - You have tools: `schedule_medicine_reminder`, `list_my_reminders`, `opt_out_of_reminders`.
 - YES, YOU CAN SET REMINDERS. When a caller asks you to remind them about a medicine ("reminder laga sakti ho kya?", "मुझे दवा याद दिला दीजिए", "set a daily reminder for me"), you MUST NEVER say you cannot, and you MUST NEVER redirect them to a phone alarm, Google Assistant, Siri, or a family member. That is now a real capability you own.
 - WHAT IT ACTUALLY IS: a daily phone call from you at the time they choose, asking whether they have taken that medicine. Say this in one plain sentence so they know their phone will ring - do not describe it as an app notification.
@@ -109,7 +110,7 @@ DAY 6 MEDICATION REMINDER CALLS (YOU CAN ACTUALLY SET THESE - DO NOT DENY IT)
 - IF THEY ASK WHAT REMINDERS THEY ALREADY HAVE: call `list_my_reminders` and read the answer out as natural speech, never as a raw list.
 - IF THEY ASK TO STOP THE CALLS: call `opt_out_of_reminders` immediately. Never ask why, never try to talk them out of it.
 
-DAY 7 WHEN YOU MUST ASK A HUMAN FOR HELP (`create_escalation`)
+HUMAN ESCALATION PROTOCOL (`create_escalation`)
 - You have one more tool: `create_escalation`. It files a real request that a human health coordinator sees on their help-desk dashboard and chat channel. It is NOT an instant answer machine - a person reads it later.
 - THERE ARE EXACTLY TWO REASONS TO USE IT. Nothing else qualifies:
   1. `red_flag_symptom` - the caller describes a red-flag or emergency symptom: chest pain, difficulty breathing, stroke signs (face drooping, slurred speech, one-sided weakness), severe or uncontrolled bleeding, fainting or unconsciousness, a seizure, suicidal intent, severe pain during pregnancy, or a newborn who will not feed or breathe normally. Examples: "मुझे सीने में तेज़ दर्द है और साँस नहीं आ रही", "I have been bleeding heavily since morning".
@@ -252,7 +253,6 @@ BOOKING AN APPOINTMENT WORKFLOW:
 RETURN TO HEALTH ADVISOR:
 - If the user asks for general health advice, symptom triage, diet/sleep tips, home remedies, or medicine reminders, politely explain that you specialize in clinic visits and transfer them back to Aanya using `return_to_health_advisor`.
 """
-
 
 
 # A reminder call has no reason to run long. This cap protects against a wedged
@@ -404,8 +404,18 @@ def _spoken_time(schedule_time: str, language: str) -> str:
     out in words instead. Falls back to the raw string on bad input.
     """
     hindi_numbers = {
-        1: "एक", 2: "दो", 3: "तीन", 4: "चार", 5: "पाँच", 6: "छह",
-        7: "सात", 8: "आठ", 9: "नौ", 10: "दस", 11: "ग्यारह", 12: "बारह",
+        1: "एक",
+        2: "दो",
+        3: "तीन",
+        4: "चार",
+        5: "पाँच",
+        6: "छह",
+        7: "सात",
+        8: "आठ",
+        9: "नौ",
+        10: "दस",
+        11: "ग्यारह",
+        12: "बारह",
     }
     try:
         hour, minute = (int(part) for part in schedule_time.split(":", 1))
@@ -414,7 +424,13 @@ def _spoken_time(schedule_time: str, language: str) -> str:
 
     hour_12 = hour % 12 or 12
     if language == "English":
-        period = "in the morning" if hour < 12 else "in the evening" if hour < 17 else "at night"
+        period = (
+            "in the morning"
+            if hour < 12
+            else "in the evening"
+            if hour < 17
+            else "at night"
+        )
         clock = f"{hour_12}" if minute == 0 else f"{hour_12}:{minute:02d}"
         return f"{clock} {period}"
 
@@ -447,8 +463,16 @@ def _spoken_reference(reference_id: str, language: str = "Hindi") -> str:
     prefix, _, number = text.partition("-")
     if language == "English":
         english_digits = {
-            "0": "zero", "1": "one", "2": "two", "3": "three", "4": "four",
-            "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine",
+            "0": "zero",
+            "1": "one",
+            "2": "two",
+            "3": "three",
+            "4": "four",
+            "5": "five",
+            "6": "six",
+            "7": "seven",
+            "8": "eight",
+            "9": "nine",
         }
         letters = " ".join(prefix)
         digits = " ".join(english_digits.get(ch, ch) for ch in number)
@@ -462,8 +486,16 @@ def _spoken_reference(reference_id: str, language: str = "Hindi") -> str:
         "T": "टी",
     }
     hindi_digits = {
-        "0": "शून्य", "1": "एक", "2": "दो", "3": "तीन", "4": "चार",
-        "5": "पाँच", "6": "छह", "7": "सात", "8": "आठ", "9": "नौ",
+        "0": "शून्य",
+        "1": "एक",
+        "2": "दो",
+        "3": "तीन",
+        "4": "चार",
+        "5": "पाँच",
+        "6": "छह",
+        "7": "सात",
+        "8": "आठ",
+        "9": "नौ",
     }
     letters = " ".join(hindi_letters.get(ch, ch) for ch in prefix)
     digits = " ".join(hindi_digits.get(ch, ch) for ch in number)
@@ -490,7 +522,7 @@ def build_outbound_opening(call_info: dict) -> str:
             opening += f" at {when}"
         opening += (
             ", so this is that reminder call. "
-            "If you would like these calls to stop, just say \"stop the reminders\" "
+            'If you would like these calls to stop, just say "stop the reminders" '
             "and I will switch them off right away. "
             f"Have you taken your {medicine} today?"
         )
@@ -504,7 +536,7 @@ def build_outbound_opening(call_info: dict) -> str:
         opening += f" {when} का"
     opening += (
         " रिमाइंडर सेट किया था, इसलिए यह कॉल की है। "
-        "अगर आप ये कॉल बंद करवाना चाहें, तो बस कहिए \"रिमाइंडर बंद करें\", "
+        'अगर आप ये कॉल बंद करवाना चाहें, तो बस कहिए "रिमाइंडर बंद करें", '
         "मैं तुरंत बंद कर दूँगी। "
         f"क्या आपने आज {medicine} ले ली है?"
     )
@@ -599,9 +631,17 @@ class Assistant(HealthAgentBase):
             return "Consent was not granted. Caller memory was NOT saved."
 
         # Extract phone_number or ip_address from session userdata if not provided by LLM
-        if not phone_number and hasattr(context, "session") and hasattr(context.session, "userdata"):
+        if (
+            not phone_number
+            and hasattr(context, "session")
+            and hasattr(context.session, "userdata")
+        ):
             phone_number = context.session.userdata.get("phone_number", "")
-        if not ip_address and hasattr(context, "session") and hasattr(context.session, "userdata"):
+        if (
+            not ip_address
+            and hasattr(context, "session")
+            and hasattr(context.session, "userdata")
+        ):
             ip_address = context.session.userdata.get("ip_address", "")
 
         facts = {
@@ -637,7 +677,9 @@ class Assistant(HealthAgentBase):
         return f"No memory record found to delete for '{user_id_or_name}'."
 
     @function_tool
-    async def opt_out_of_reminders(self, context: RunContext, user_id_or_phone: str = "") -> str:
+    async def opt_out_of_reminders(
+        self, context: RunContext, user_id_or_phone: str = ""
+    ) -> str:
         """Stop all future medication reminder calls for this caller. Call this IMMEDIATELY when the caller says 'stop calling me', 'unsubscribe', 'रिमाइंडर बंद करें', 'मुझे कॉल न करें', or otherwise asks not to be called again.
 
         Args:
@@ -656,7 +698,9 @@ class Assistant(HealthAgentBase):
 
         rows = reminders.opt_out(target)
         if rows:
-            logger.info(f"Opt-out honoured for '{target}': {rows} reminder(s) disabled.")
+            logger.info(
+                f"Opt-out honoured for '{target}': {rows} reminder(s) disabled."
+            )
             return (
                 f"Opted out successfully - {rows} reminder(s) disabled for '{target}'. "
                 "Confirm this out loud to the caller, apologise for the disturbance, "
@@ -718,7 +762,9 @@ class Assistant(HealthAgentBase):
                 "greeting them - then call this tool again."
             )
 
-        lang = "English" if (language or "").strip().lower().startswith("en") else "Hindi"
+        lang = (
+            "English" if (language or "").strip().lower().startswith("en") else "Hindi"
+        )
 
         # Same medicine, same time, same number is a repeat of what they already
         # asked for, not a second reminder. Registering it twice would ring them
@@ -751,10 +797,12 @@ class Assistant(HealthAgentBase):
             f"for {name} ({target}), language={lang}."
         )
 
-        stop_phrase = (
-            '"stop the reminders"' if lang == "English" else '"रिमाइंडर बंद करें"'
+        stop_phrase = '"stop the reminders"' if lang == "English" else '"रिमाइंडर बंद करें"'
+        detail = (
+            f" The dosage they gave is: {dosage.strip()}."
+            if (dosage or "").strip()
+            else ""
         )
-        detail = f" The dosage they gave is: {dosage.strip()}." if (dosage or "").strip() else ""
         return (
             f"Saved as reminder {reminder_id}. Now confirm it out loud in {lang}: you "
             f"will call them every day at {_spoken_time(when, lang)} to ask about "
@@ -764,7 +812,9 @@ class Assistant(HealthAgentBase):
         )
 
     @function_tool
-    async def list_my_reminders(self, context: RunContext, phone_number: str = "") -> str:
+    async def list_my_reminders(
+        self, context: RunContext, phone_number: str = ""
+    ) -> str:
         """Read back the medication reminders already set for this caller. Use this when they ask what reminders they have, or before adding one they may already have.
 
         Args:
@@ -908,7 +958,9 @@ class Assistant(HealthAgentBase):
                 "a number."
             )
 
-        lang = "English" if (language or "").strip().lower().startswith("en") else "Hindi"
+        lang = (
+            "English" if (language or "").strip().lower().startswith("en") else "Hindi"
+        )
 
         row = escalations.create_escalation(
             caller_name=name,
@@ -964,7 +1016,9 @@ class Assistant(HealthAgentBase):
         )
 
     @function_tool
-    async def lookup_emergency_helpline(self, context: RunContext, category: str = "general") -> str:
+    async def lookup_emergency_helpline(
+        self, context: RunContext, category: str = "general"
+    ) -> str:
         """Look up official government emergency and health helplines (108 Ambulance, 104 Health advice, 14416 Tele-MANAS).
 
         Args:
@@ -986,9 +1040,10 @@ class Assistant(HealthAgentBase):
             )
 
     @function_tool
-    async def transfer_to_clinic_specialist(self, context: RunContext) -> tuple[Agent, str]:
-        """Transfer the call to the Clinic & Appointment Specialist when the user asks for nearest PHC, hospital, clinic lookup, or booking a clinic appointment.
-        """
+    async def transfer_to_clinic_specialist(
+        self, context: RunContext
+    ) -> tuple[Agent, str]:
+        """Transfer the call to the Clinic & Appointment Specialist when the user asks for nearest PHC, hospital, clinic lookup, or booking a clinic appointment."""
         logger.info("Transferring call to ClinicAppointmentSpecialist...")
         specialist = ClinicAppointmentSpecialist(
             chat_ctx=self.chat_ctx.copy(exclude_instructions=True)
@@ -1011,7 +1066,11 @@ class ClinicAppointmentSpecialist(HealthAgentBase):
         """Step 5: Specialist self-introduction upon transfer."""
         is_english = False
         if self.chat_ctx:
-            messages = self.chat_ctx.messages() if callable(getattr(self.chat_ctx, "messages", None)) else getattr(self.chat_ctx, "messages", [])
+            messages = (
+                self.chat_ctx.messages()
+                if callable(getattr(self.chat_ctx, "messages", None))
+                else getattr(self.chat_ctx, "messages", [])
+            )
             for msg in reversed(messages):
                 if msg.role == "user" and isinstance(msg.content, str):
                     if not any("\u0900" <= c <= "\u097f" for c in msg.content):
@@ -1051,7 +1110,11 @@ class ClinicAppointmentSpecialist(HealthAgentBase):
             simulated_failure: Set to True ONLY if testing offline network failure path.
         """
         # Tool chaining: check session userdata / caller memory for saved location if missing
-        if not location and hasattr(context, "session") and hasattr(context.session, "userdata"):
+        if (
+            not location
+            and hasattr(context, "session")
+            and hasattr(context.session, "userdata")
+        ):
             location = context.session.userdata.get("location", "")
 
         if not location:
@@ -1060,7 +1123,9 @@ class ClinicAppointmentSpecialist(HealthAgentBase):
                 "You MUST ask the caller: 'आप किस शहर, जिले या स्थान पर हैं?' (Which city, district, or place are you located in?) first!"
             )
 
-        logger.info(f"Looking up health facility for location='{location}', facility_type='{facility_type}'")
+        logger.info(
+            f"Looking up health facility for location='{location}', facility_type='{facility_type}'"
+        )
         try:
             result = health_services.search_health_facilities(
                 location_or_pincode=location,
@@ -1119,16 +1184,14 @@ class ClinicAppointmentSpecialist(HealthAgentBase):
             number = number or _normalize_phone_e164(record.get("phone_number", ""))
 
         if not name:
-            return (
-                "Caller name is missing. Ask the caller for their name before booking the appointment."
-            )
+            return "Caller name is missing. Ask the caller for their name before booking the appointment."
 
         if not number:
-            return (
-                "Phone number is missing. Ask the caller for their 10-digit mobile number so we can confirm their appointment."
-            )
+            return "Phone number is missing. Ask the caller for their 10-digit mobile number so we can confirm their appointment."
 
-        lang = "English" if (language or "").strip().lower().startswith("en") else "Hindi"
+        lang = (
+            "English" if (language or "").strip().lower().startswith("en") else "Hindi"
+        )
 
         row = appointments.book_appointment(
             caller_name=name,
@@ -1140,9 +1203,7 @@ class ClinicAppointmentSpecialist(HealthAgentBase):
         )
 
         if not row:
-            return (
-                "Failed to book appointment due to missing information. Please re-check the details with the caller."
-            )
+            return "Failed to book appointment due to missing information. Please re-check the details with the caller."
 
         spoken = _spoken_reference(row["reference_id"], lang)
         return (
@@ -1165,12 +1226,9 @@ class ClinicAppointmentSpecialist(HealthAgentBase):
 
     @function_tool
     async def return_to_health_advisor(self, context: RunContext) -> tuple[Agent, str]:
-        """Transfer caller back to Aanya, the main Health Advisor, for symptom guidance, wellness advice, diet, sleep, or medicine reminders.
-        """
+        """Transfer caller back to Aanya, the main Health Advisor, for symptom guidance, wellness advice, diet, sleep, or medicine reminders."""
         logger.info("Transferring caller back to Assistant (Aanya)...")
-        assistant = Assistant(
-            chat_ctx=self.chat_ctx.copy(exclude_instructions=True)
-        )
+        assistant = Assistant(chat_ctx=self.chat_ctx.copy(exclude_instructions=True))
         return (
             assistant,
             "Transferring back to Aanya Health Advisor. Aanya will now continue assisting with health questions and advice.",
@@ -1281,7 +1339,9 @@ async def _wait_until_sip_answered(
     'unknown' when no answer signal ever arrives at all - in that case the caller
     should carry on rather than refuse to speak.
     """
-    if _sip_call_status(participant) == SIP_STATUS_ANSWERED or _dialer_says_answered(ctx):
+    if _sip_call_status(participant) == SIP_STATUS_ANSWERED or _dialer_says_answered(
+        ctx
+    ):
         return SIP_STATUS_ANSWERED
 
     wait_started = time.monotonic()
@@ -1485,7 +1545,9 @@ async def run_outbound_reminder(ctx: JobContext, call_info: dict) -> None:
     # so give it SIP_SPEAK_EARLY_SEC and then talk anyway. Only a hangup is a real
     # reason to stay silent: a 'timeout' here just means "no signal yet", which on
     # this trunk is the normal case for a call that was genuinely picked up.
-    call_state = await _wait_until_sip_answered(ctx, participant, timeout=SIP_SPEAK_EARLY_SEC)
+    call_state = await _wait_until_sip_answered(
+        ctx, participant, timeout=SIP_SPEAK_EARLY_SEC
+    )
     if call_state == SIP_STATUS_ENDED:
         logger.info(
             f"Call to {phone_number} ended while still ringing ({call_state}); "
@@ -1562,7 +1624,8 @@ async def run_outbound_reminder(ctx: JobContext, call_info: dict) -> None:
             audio_input=room_io.AudioInputOptions(
                 noise_cancellation=lambda params: (
                     noise_cancellation.BVCTelephony()
-                    if params.participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
+                    if params.participant.kind
+                    == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
                     else noise_cancellation.BVC()
                 ),
             ),
@@ -1598,7 +1661,11 @@ async def run_outbound_reminder(ctx: JobContext, call_info: dict) -> None:
     # Assigned unconditionally: the Day 8 analytics row below reads this, and a
     # reminder_id of 0 (a manually dispatched test call) must still be logged
     # rather than raise.
-    outcome = reminders.OUTCOME_ANSWERED if caller_spoke else reminders.OUTCOME_POSSIBLE_VOICEMAIL
+    outcome = (
+        reminders.OUTCOME_ANSWERED
+        if caller_spoke
+        else reminders.OUTCOME_POSSIBLE_VOICEMAIL
+    )
 
     if reminder_id:
         reminder = reminders.get_reminder(reminder_id)
@@ -1631,7 +1698,6 @@ async def run_outbound_reminder(ctx: JobContext, call_info: dict) -> None:
         outcome_reason=f"Medication reminder call ({outcome})",
         duration_sec=duration,
     )
-
 
 
 @server.rtc_session(agent_name="Aanya")
@@ -1670,7 +1736,9 @@ async def my_agent(ctx: JobContext):
 
     @ctx.room.on("participant_disconnected")
     def on_participant_disconnected(participant: rtc.RemoteParticipant):
-        logger.info(f"Caller ended the call / disconnected: identity='{participant.identity}', name='{participant.name}'")
+        logger.info(
+            f"Caller ended the call / disconnected: identity='{participant.identity}', name='{participant.name}'"
+        )
 
     if is_outbound:
         await run_outbound_reminder(ctx, call_info)
@@ -1683,9 +1751,25 @@ async def my_agent(ctx: JobContext):
     try:
         participant = await ctx.wait_for_participant()
         attrs = getattr(participant, "attributes", {}) or {}
-        logger.info(f"Connected participant: identity='{participant.identity}', name='{participant.name}', attributes={attrs}")
+        logger.info(
+            f"Connected participant: identity='{participant.identity}', name='{participant.name}', attributes={attrs}"
+        )
 
-        phone_number = attrs.get("sip.phoneNumber", attrs.get("phone", participant.identity if (participant.identity and (participant.identity.startswith("+") or participant.identity.isdigit())) else ""))
+        phone_number = attrs.get(
+            "sip.phoneNumber",
+            attrs.get(
+                "phone",
+                participant.identity
+                if (
+                    participant.identity
+                    and (
+                        participant.identity.startswith("+")
+                        or participant.identity.isdigit()
+                    )
+                )
+                else "",
+            ),
+        )
         ip_address = attrs.get("client_ip", attrs.get("ip", ""))
 
         if participant.identity:
@@ -1715,11 +1799,17 @@ async def my_agent(ctx: JobContext):
 
     assistant = Assistant(instructions=agent_instructions)
 
-    saved_location = caller_record.get("facts", {}).get("location", "") if caller_record else ""
+    saved_location = (
+        caller_record.get("facts", {}).get("location", "") if caller_record else ""
+    )
 
     session = build_session(
         ctx,
-        userdata={"phone_number": phone_number, "ip_address": ip_address, "location": saved_location},
+        userdata={
+            "phone_number": phone_number,
+            "ip_address": ip_address,
+            "location": saved_location,
+        },
     )
 
     # ------------------------------------------------------------------
@@ -1740,7 +1830,9 @@ async def my_agent(ctx: JobContext):
     analytics_recorded = False
 
     call_type = "inbound_sip" if phone_number else "inbound_browser"
-    caller_id = phone_number or (caller_record["name"] if caller_record else "Browser Caller")
+    caller_id = phone_number or (
+        caller_record["name"] if caller_record else "Browser Caller"
+    )
 
     @session.on("user_input_transcribed")
     def _on_inbound_user_transcript(event) -> None:
@@ -1755,7 +1847,9 @@ async def my_agent(ctx: JobContext):
         analytics_recorded = True
 
         duration = time.monotonic() - audio_live_at if audio_live_at else 0.0
-        outcome, reason = classify_call(caller_spoke, duration, audio_live_at is not None)
+        outcome, reason = classify_call(
+            caller_spoke, duration, audio_live_at is not None
+        )
 
         db.record_call_analytics(
             session_id=ctx.room.name,
@@ -1803,10 +1897,7 @@ async def my_agent(ctx: JobContext):
                     f"आज आपकी क्या सहायता कर सकती हूँ?"
                 )
     else:
-        greeting_msg = (
-            "नमस्ते! मैं आन्या हूँ, आपकी हेल्थ एडवाइजर। "
-            "आज आपकी क्या सहायता कर सकती हूँ?"
-        )
+        greeting_msg = "नमस्ते! मैं आन्या हूँ, आपकी हेल्थ एडवाइजर। आज आपकी क्या सहायता कर सकती हूँ?"
 
     await session.start(
         agent=assistant,
@@ -1815,7 +1906,8 @@ async def my_agent(ctx: JobContext):
             audio_input=room_io.AudioInputOptions(
                 noise_cancellation=lambda params: (
                     noise_cancellation.BVCTelephony()
-                    if params.participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
+                    if params.participant.kind
+                    == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
                     else noise_cancellation.BVC()
                 ),
             ),
@@ -1830,4 +1922,3 @@ async def my_agent(ctx: JobContext):
 
 if __name__ == "__main__":
     cli.run_app(server)
-

@@ -92,7 +92,12 @@ def test_recording_a_call_increments_total_and_success(test_db):
 
 
 def test_failed_call_increments_failed_only(test_db):
-    _record(test_db, outcome="failed", outcome_reason="Early disconnect / no response", duration_sec=2.1)
+    _record(
+        test_db,
+        outcome="failed",
+        outcome_reason="Early disconnect / no response",
+        duration_sec=2.1,
+    )
     summary = db.get_call_analytics_summary(db_path=test_db)
 
     assert summary["total_calls"] == 1
@@ -210,11 +215,11 @@ def test_outcome_reason_is_a_label_not_a_transcript(test_db):
 @pytest.mark.parametrize(
     "caller_spoke,duration,expected",
     [
-        (True, 42.0, True),      # a real consultation
-        (True, 5.0, True),       # exactly at the boundary
-        (True, 4.9, False),      # spoke, but hung up too fast to be helped
-        (False, 60.0, False),    # long silence — voicemail or an open tab
-        (False, 1.0, False),     # instant drop
+        (True, 42.0, True),  # a real consultation
+        (True, 5.0, True),  # exactly at the boundary
+        (True, 4.9, False),  # spoke, but hung up too fast to be helped
+        (False, 60.0, False),  # long silence — voicemail or an open tab
+        (False, 1.0, False),  # instant drop
     ],
 )
 def test_success_condition(caller_spoke, duration, expected):
@@ -249,30 +254,40 @@ def test_duration_is_rounded_for_display(test_db):
 
 
 def test_caller_who_left_during_setup_is_not_blamed_for_silence():
-    outcome, reason = classify_call(caller_spoke=False, duration_sec=0.0, audio_went_live=False)
+    outcome, reason = classify_call(
+        caller_spoke=False, duration_sec=0.0, audio_went_live=False
+    )
     assert outcome == "failed"
     assert reason == "Caller left before agent was ready"
 
 
 def test_setup_time_alone_can_never_produce_a_success():
     """A long cold start must not fake a successful call."""
-    outcome, _ = classify_call(caller_spoke=False, duration_sec=120.0, audio_went_live=False)
+    outcome, _ = classify_call(
+        caller_spoke=False, duration_sec=120.0, audio_went_live=False
+    )
     assert outcome == "failed"
 
 
 def test_successful_call_is_classified_with_the_guidance_reason():
-    outcome, reason = classify_call(caller_spoke=True, duration_sec=42.0, audio_went_live=True)
+    outcome, reason = classify_call(
+        caller_spoke=True, duration_sec=42.0, audio_went_live=True
+    )
     assert outcome == "success"
     assert reason == "Health guidance & consultation provided"
 
 
 def test_silence_after_greeting_is_an_early_disconnect():
-    outcome, reason = classify_call(caller_spoke=False, duration_sec=9.0, audio_went_live=True)
+    outcome, reason = classify_call(
+        caller_spoke=False, duration_sec=9.0, audio_went_live=True
+    )
     assert (outcome, reason) == ("failed", "Early disconnect / no response")
 
 
 def test_talking_briefly_then_hanging_up_is_a_short_call():
-    outcome, reason = classify_call(caller_spoke=True, duration_sec=3.0, audio_went_live=True)
+    outcome, reason = classify_call(
+        caller_spoke=True, duration_sec=3.0, audio_went_live=True
+    )
     assert outcome == "failed"
     assert reason == f"Short call (<{MIN_SUCCESS_DURATION_SEC:.0f}s)"
 

@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+
 import pytest
 
 # Add src to python path for testing
@@ -7,8 +8,8 @@ src_dir = Path(__file__).parent.parent / "src"
 if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
-import db
-from agent import Assistant
+import db  # noqa: E402
+from agent import Assistant  # noqa: E402
 
 
 @pytest.fixture

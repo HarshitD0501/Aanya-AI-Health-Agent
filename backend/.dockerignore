@@ -27,8 +27,15 @@ coverage/
 *.log
 *.gz
 *.tgz
-.tmp
-.cache
+*.tmp
+*.cache
+*.db
+*.sqlite
+*.sqlite3
+
+# SIP Trunks & Secrets
+outbound-trunk.json
+linphone-trunk.json
 
 # Environment variables
 .env

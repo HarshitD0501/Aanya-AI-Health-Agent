@@ -24,7 +24,6 @@ load_dotenv(Path(__file__).parent.parent / ".env.local")
 
 import appointments  # noqa: E402
 import db  # noqa: E402
-import escalations  # noqa: E402
 from agent import (  # noqa: E402
     Assistant,
     ClinicAppointmentSpecialist,

@@ -12,6 +12,7 @@ import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -66,7 +67,9 @@ def test_create_and_fetch_reminder(test_db):
 def test_list_reminders_hides_opted_out(test_db):
     """Opted-out rows are kept as a record but never returned for dialling."""
     _make_reminder(test_db)
-    _make_reminder(test_db, user_id="suresh", name="Suresh", phone_number="+918888888888")
+    _make_reminder(
+        test_db, user_id="suresh", name="Suresh", phone_number="+918888888888"
+    )
 
     assert len(reminders.list_reminders(db_path=test_db)) == 2
 
@@ -374,9 +377,7 @@ def test_get_due_reminders_selects_only_due_rows(test_db):
         phone_number="+918888888888",
     )
 
-    due = reminders.get_due_reminders(
-        now=datetime(2026, 8, 11, 20, 2), db_path=test_db
-    )
+    due = reminders.get_due_reminders(now=datetime(2026, 8, 11, 20, 2), db_path=test_db)
     assert [r["name"] for r in due] == ["DueNow"]
     assert due[0]["retry_reason"] == "First attempt."
 
@@ -391,9 +392,7 @@ def test_get_due_reminders_skips_already_answered(test_db):
         db_path=test_db,
     )
 
-    due = reminders.get_due_reminders(
-        now=datetime(2026, 8, 11, 20, 5), db_path=test_db
-    )
+    due = reminders.get_due_reminders(now=datetime(2026, 8, 11, 20, 5), db_path=test_db)
     assert due == []
 
 
@@ -402,9 +401,7 @@ def test_get_due_reminders_skips_opted_out(test_db):
     _make_reminder(test_db, schedule_time="20:00")
     reminders.opt_out("ramesh", db_path=test_db)
 
-    due = reminders.get_due_reminders(
-        now=datetime(2026, 8, 11, 20, 0), db_path=test_db
-    )
+    due = reminders.get_due_reminders(now=datetime(2026, 8, 11, 20, 0), db_path=test_db)
     assert due == []
 
 
@@ -440,11 +437,27 @@ def test_get_due_reminders_retries_a_no_answer(test_db):
 @pytest.mark.parametrize(
     ("message", "expected_outcome", "expected_status"),
     [
-        ("twirp error internal: sip status 486 Busy Here", reminders.OUTCOME_REJECTED, "486"),
+        (
+            "twirp error internal: sip status 486 Busy Here",
+            reminders.OUTCOME_REJECTED,
+            "486",
+        ),
         ("twirp error internal: 603 Decline", reminders.OUTCOME_REJECTED, "603"),
-        ("twirp error internal: 408 Request Timeout", reminders.OUTCOME_NO_ANSWER, "408"),
-        ("twirp error internal: 480 Temporarily Unavailable", reminders.OUTCOME_NO_ANSWER, "480"),
-        ("twirp error canceled: 487 Request Terminated", reminders.OUTCOME_NO_ANSWER, "487"),
+        (
+            "twirp error internal: 408 Request Timeout",
+            reminders.OUTCOME_NO_ANSWER,
+            "408",
+        ),
+        (
+            "twirp error internal: 480 Temporarily Unavailable",
+            reminders.OUTCOME_NO_ANSWER,
+            "480",
+        ),
+        (
+            "twirp error canceled: 487 Request Terminated",
+            reminders.OUTCOME_NO_ANSWER,
+            "487",
+        ),
     ],
 )
 def test_classify_dial_error_by_sip_status(message, expected_outcome, expected_status):
@@ -525,11 +538,11 @@ def test_hindi_opening_states_who_why_and_optout():
             "language_preference": "Hindi",
         }
     )
-    assert "आन्या" in opening                    # who
-    assert "हेल्थ रिमाइंडर सेवा" in opening        # who, on whose behalf
-    assert "Metformin" in opening                # why
-    assert "रिमाइंडर बंद करें" in opening          # how to stop
-    assert "रात आठ बजे" in opening                # spoken time, not "20:00"
+    assert "आन्या" in opening  # who
+    assert "हेल्थ रिमाइंडर सेवा" in opening  # who, on whose behalf
+    assert "Metformin" in opening  # why
+    assert "रिमाइंडर बंद करें" in opening  # how to stop
+    assert "रात आठ बजे" in opening  # spoken time, not "20:00"
     assert "20:00" not in opening
 
 
@@ -649,10 +662,10 @@ async def test_scheduling_a_reminder_mid_call_saves_a_dialable_row(agent_db):
     rows = reminders.list_reminders(db_path=agent_db)
     assert len(rows) == 1
     row = rows[0]
-    assert row["phone_number"] == "+919454535137"   # normalized, so it can be dialled
-    assert row["schedule_time"] == "20:00"          # spoken "8pm" stored as 24h
+    assert row["phone_number"] == "+919454535137"  # normalized, so it can be dialled
+    assert row["schedule_time"] == "20:00"  # spoken "8pm" stored as 24h
     assert row["language_preference"] == "Hindi"
-    assert "रात आठ बजे" in result                    # confirmed back in words, not "20:00"
+    assert "रात आठ बजे" in result  # confirmed back in words, not "20:00"
 
 
 async def test_reminder_is_refused_without_a_number_a_name_or_a_time(agent_db):
@@ -661,13 +674,22 @@ async def test_reminder_is_refused_without_a_number_a_name_or_a_time(agent_db):
 
     assistant = Assistant()
     no_number = await assistant.schedule_medicine_reminder(
-        _tool_context(phone_number=""), medicine_name="दवा", time_24h="20:00", caller_name="H"
+        _tool_context(phone_number=""),
+        medicine_name="दवा",
+        time_24h="20:00",
+        caller_name="H",
     )
     no_name = await assistant.schedule_medicine_reminder(
-        _tool_context(), medicine_name="दवा", time_24h="20:00", phone_number="9454535137"
+        _tool_context(),
+        medicine_name="दवा",
+        time_24h="20:00",
+        phone_number="9454535137",
     )
     bad_time = await assistant.schedule_medicine_reminder(
-        _tool_context(), medicine_name="दवा", time_24h="raat aath", caller_name="H",
+        _tool_context(),
+        medicine_name="दवा",
+        time_24h="raat aath",
+        caller_name="H",
         phone_number="9454535137",
     )
 
@@ -707,11 +729,15 @@ async def test_listing_reminders_uses_the_number_from_the_live_call(agent_db):
     )
 
     # Phone number omitted: it must come from the call's own userdata.
-    listed = await assistant.list_my_reminders(_tool_context(phone_number="+919454535137"))
+    listed = await assistant.list_my_reminders(
+        _tool_context(phone_number="+919454535137")
+    )
     assert "दवा" in listed
     assert "सुबह आठ बजे" in listed
 
-    empty = await assistant.list_my_reminders(_tool_context(phone_number="+911111111111"))
+    empty = await assistant.list_my_reminders(
+        _tool_context(phone_number="+911111111111")
+    )
     assert "No active reminders" in empty
 
 
@@ -756,6 +782,7 @@ class _FakeRoom:
 
     def on(self, event: str, callback=None):
         if callback is None:
+
             def decorator(fn):
                 self._handlers.setdefault(event, []).append(fn)
                 return fn
@@ -798,7 +825,9 @@ async def test_a_ringing_phone_with_an_audio_track_is_not_answered():
 
     state = await _wait_until_sip_answered(ctx, participant, timeout=1.0)
 
-    assert state == "timeout", "a track published during the ring must not count as pickup"
+    assert state == "timeout", (
+        "a track published during the ring must not count as pickup"
+    )
 
 
 async def test_pickup_mid_ring_is_detected_from_the_status_event():
@@ -1035,7 +1064,9 @@ async def test_a_leg_that_left_is_still_a_no_answer(monkeypatch):
 @pytest.mark.parametrize(
     "error",
     [
-        OSError("[WinError 1236] The network connection was aborted by the local system"),
+        OSError(
+            "[WinError 1236] The network connection was aborted by the local system"
+        ),
         ConnectionResetError("connection reset by peer"),
         asyncio.TimeoutError(),
         Exception("Server disconnected"),
@@ -1090,7 +1121,9 @@ def test_the_dial_timeout_outlives_the_ring():
 class _FakeSipApi:
     """A create_sip_participant that answers after a delay, or raises."""
 
-    def __init__(self, answer_after: float = 0.0, error: Exception = None) -> None:
+    def __init__(
+        self, answer_after: float = 0.0, error: Optional[Exception] = None
+    ) -> None:
         self.answer_after = answer_after
         self.error = error
         self.request = None

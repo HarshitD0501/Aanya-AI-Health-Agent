@@ -79,7 +79,7 @@ _MIN_PHONE_DIGITS = 7
 _MAX_PHONE_DIGITS = 15
 
 # Punctuation people type into a phone number that carries no meaning.
-_PHONE_NOISE = " -()./ \t"
+_PHONE_NOISE = " -()./\u00a0\t"
 
 
 class SipConfigError(RuntimeError):
@@ -203,7 +203,9 @@ def parse_sip_address(raw: str) -> SipAddress:
     if separator:
         # A port belongs to the trunk's hostname, never to the address we dial.
         domain = domain.split(":", 1)[0]
-    return SipAddress(user=user.strip(), domain=domain.strip().lower(), had_scheme=had_scheme)
+    return SipAddress(
+        user=user.strip(), domain=domain.strip().lower(), had_scheme=had_scheme
+    )
 
 
 def looks_like_phone_number(raw: str) -> bool:
@@ -386,9 +388,7 @@ def _resolve_sip(destination: str, identity: str, settings: SipSettings) -> Dial
         # sip_call_to carries only the user part, so the trunk's hostname is what
         # actually decides where the INVITE goes. A mismatch here means the call
         # would quietly ring the wrong domain's account of the same name.
-        note = (
-            f"{note}; " if note else ""
-        ) + (
+        note = (f"{note}; " if note else "") + (
             f"destination domain '{domain}' does not match the trunk hostname "
             f"'{settings.linphone_domain}' - the trunk wins"
         )

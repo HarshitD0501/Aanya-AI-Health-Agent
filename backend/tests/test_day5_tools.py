@@ -3,14 +3,13 @@ Automated Unit Tests for Day 5 - External Tools & Real Domain Data (Health Acces
 Tests live OpenStreetMap PHC lookup, emergency helplines, tool chaining, data attribution, and graceful failure handling.
 """
 
-import json
 import pytest
+
+from db import get_caller_memory, init_db, save_caller_memory
 from health_services import (
-    DATA_SOURCE_ATTRIBUTION,
     get_emergency_helpline,
     search_health_facilities,
 )
-from db import init_db, save_caller_memory, get_caller_memory
 
 
 @pytest.fixture
@@ -40,7 +39,10 @@ def test_graceful_failure_handling():
     """Test graceful failure path when simulated_failure is True."""
     result = search_health_facilities("jaipur", simulated_failure=True)
     assert result["status"] == "error"
-    assert "unreachable" in result["message"].lower() or "timeout" in result["message"].lower()
+    assert (
+        "unreachable" in result["message"].lower()
+        or "timeout" in result["message"].lower()
+    )
     assert "108" in result["fallback_recommendation"]
 
 
@@ -75,4 +77,7 @@ def test_tool_chaining_memory_location(test_db):
     # Step 3: Run PHC lookup with chained location
     result = search_health_facilities(saved_location)
     assert result["status"] == "success"
-    assert "Jaipur" in result["facilities"][0]["name"] or "jaipur" in result["facilities"][0]["address"].lower()
+    assert (
+        "Jaipur" in result["facilities"][0]["name"]
+        or "jaipur" in result["facilities"][0]["address"].lower()
+    )

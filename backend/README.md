@@ -1,16 +1,9 @@
-# Backend — Voice Agent with Murf Falcon TTS
+# Aanya — Real-Time Multilingual Voice AI Health Advisor
 
-The Python backend for the Voice Agent Starter. It runs a real-time voice AI pipeline using [LiveKit Agents](https://docs.livekit.io/agents), connecting Murf Falcon TTS, Deepgram STT, and Google Gemini into a single conversational agent.
+> **Author & Maintainer:** [Harshit Dubey](https://github.com/HarshitD0501)  
+> **Technology Stack:** LiveKit Agents, Murf Falcon TTS, Deepgram STT, Google Gemini, Silero VAD
 
-## How It Works
-
-```
-User speaks → [Deepgram STT] → text → [Gemini LLM] → response → [Murf Falcon TTS] → audio → User hears
-```
-
-LiveKit handles the real-time audio transport. The agent connects to LiveKit as a participant, listens for user speech, and responds with synthesized audio.
-
-The same pipeline also runs **outbound**, where the agent dials a real phone over a Twilio SIP trunk instead of waiting to be called — see [Day 6](#day-6--outbound-medication-reminder-calls).
+Aanya is an intelligent, compassionate, and real-time conversational healthcare voice AI advisor. Built for multilingual health access, Aanya supports bilingual English & Devanagari Hindi conversations, intelligent caller memory with explicit consent, outbound medication reminders via SIP telephony, human coordinator escalation protocols, and clinic/PHC appointment booking.
 
 ## Setup
 

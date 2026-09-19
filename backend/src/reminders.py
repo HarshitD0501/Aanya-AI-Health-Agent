@@ -1,5 +1,5 @@
 """
-Medication Reminder Store & Retry Policy for Day 6 - Voice for Bharat Challenge.
+Medication Reminder Store & Retry Policy.
 
 Holds the outbound-call domain logic: which reminders are due, what happened on
 the last attempt, and whether we are allowed to dial again. Deliberately free of
@@ -131,7 +131,9 @@ def create_reminder(
     return int(reminder_id)
 
 
-def get_reminder(reminder_id: int, db_path: Optional[Path] = None) -> Optional[dict[str, Any]]:
+def get_reminder(
+    reminder_id: int, db_path: Optional[Path] = None
+) -> Optional[dict[str, Any]]:
     """Fetch a single reminder by its ID."""
     db.init_db(db_path)
     conn = db.get_connection(db_path)
@@ -227,7 +229,9 @@ def record_attempt(
             (outcome, now, reminder_id),
         )
     conn.close()
-    logger.info(f"Reminder {reminder_id} attempt recorded: outcome={outcome}, sip={sip_status}.")
+    logger.info(
+        f"Reminder {reminder_id} attempt recorded: outcome={outcome}, sip={sip_status}."
+    )
 
 
 def record_medicine_response(
@@ -261,7 +265,9 @@ def record_medicine_response(
     logger.info(f"Reminder {reminder_id} adherence recorded: {response}")
 
 
-def get_attempts(reminder_id: int, db_path: Optional[Path] = None) -> list[dict[str, Any]]:
+def get_attempts(
+    reminder_id: int, db_path: Optional[Path] = None
+) -> list[dict[str, Any]]:
     """Return every logged attempt for a reminder, oldest first."""
     db.init_db(db_path)
     conn = db.get_connection(db_path)

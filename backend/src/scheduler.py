@@ -1,5 +1,5 @@
 """
-Reminder Scheduler for Day 6 - Voice for Bharat Challenge (Health Access Track).
+Medication Reminder Scheduler.
 
 Wakes on an interval, asks `reminders` which rows are due and permitted by the
 retry policy, and hands each one to `outbound.place_reminder_call`. All of the
@@ -110,7 +110,7 @@ async def watch(interval_sec: int, window_minutes: int, dry_run: bool) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Scan for due medication reminders and place the calls (Day 6)."
+        description="Scan for due medication reminders and place the calls."
     )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--once", action="store_true", help="Run a single pass and exit.")

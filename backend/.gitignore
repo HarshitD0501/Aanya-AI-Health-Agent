@@ -8,12 +8,20 @@ KMS
 .venv
 .vscode
 *.egg-info
+*.egg-info/
 .pytest_cache
 .ruff_cache
 
-# Day 6 — the real trunk config holds the SIP credential-list password
+# SQLite Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# SIP Trunks & Credentials
 outbound-trunk.json
 !outbound-trunk.example.json
+linphone-trunk.json
+!linphone-trunk.example.json
 
 # Claude Code
 .claude/settings.local.json

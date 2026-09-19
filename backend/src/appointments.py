@@ -1,5 +1,5 @@
 """
-Clinic and Appointment Booking Store for Day 9 - Voice for Bharat Challenge.
+Clinic and Appointment Booking Store.
 
 Mirrors escalations.py: provides an offline, database-backed store for scheduling
 and listing clinic and PHC appointments booked by the Clinic & Appointment Specialist.
@@ -59,7 +59,14 @@ def book_appointment(
     time_str = (appointment_time or "").strip()
     scrubbed_reason = escalations.scrub_private_details(reason or "")
 
-    if not name or not phone or not clinic or not date_str or not time_str or not scrubbed_reason:
+    if (
+        not name
+        or not phone
+        or not clinic
+        or not date_str
+        or not time_str
+        or not scrubbed_reason
+    ):
         logger.warning(
             "Appointment booking refused: name, phone, clinic, date, time, and reason are all required."
         )

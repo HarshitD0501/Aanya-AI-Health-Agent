@@ -1,14 +1,12 @@
 """
-Outbound Dialer for Day 6 - Voice for Bharat Challenge (Health Access Track).
+Outbound Dialer & SIP Telephony Dispatcher.
 
 Places a medication reminder call: dispatches Aanya into a fresh room, then dials
 the caller in as a SIP participant so both meet in the same LiveKit room.
 
 The destination is resolved by sip_target, so the same code rings a PSTN number
 through a Twilio/Plivo/Telnyx trunk or a plain SIP account (Linphone) with no
-edits here - only .env.local changes. See sip_target.py for why the SIP path
-exists: this project's Twilio trunk never reports a pickup, and its trial account
-will only dial Verified Caller IDs.
+edits here - only .env.local changes.
 
 Usage:
     python src/outbound.py --reminder-id 3
@@ -417,7 +415,6 @@ async def place_reminder_call(
             lkapi, request, room_name, target.identity
         )
 
-
         if state == "dial_failed" and dial_error is not None:
             outcome, sip_status = classify_dial_error(dial_error)
             logger.warning(
@@ -430,7 +427,11 @@ async def place_reminder_call(
                 sip_status=sip_status,
                 detail=str(dial_error)[:500],
             )
-            return {"outcome": outcome, "room_name": room_name, "sip_status": sip_status}
+            return {
+                "outcome": outcome,
+                "room_name": room_name,
+                "sip_status": sip_status,
+            }
 
         if state != "answered":
             # A hangup while still ringing is a decline or a missed call; the SIP
@@ -446,7 +447,11 @@ async def place_reminder_call(
                 sip_status=sip_status,
                 detail=f"Ring ended without an answer: {state}",
             )
-            return {"outcome": outcome, "room_name": room_name, "sip_status": sip_status}
+            return {
+                "outcome": outcome,
+                "room_name": room_name,
+                "sip_status": sip_status,
+            }
 
         # 3. Answered. Hand the answer to the agent immediately - it is waiting on
         #    exactly this before it speaks, and every millisecond here is silence
@@ -496,7 +501,9 @@ def _print_reminders() -> None:
     if not rows:
         print("No reminders registered yet. Add one with --register.")
         return
-    print(f"{'ID':<4} {'Name':<12} {'Medicine':<16} {'Time':<7} {'Destination':<28} Status")
+    print(
+        f"{'ID':<4} {'Name':<12} {'Medicine':<16} {'Time':<7} {'Destination':<28} Status"
+    )
     for row in rows:
         if row["opted_out"]:
             status = "OPTED OUT"
@@ -515,7 +522,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Place a medication reminder call (Day 6)."
     )
-    parser.add_argument("--reminder-id", type=int, help="Dial an existing reminder by ID.")
+    parser.add_argument(
+        "--reminder-id", type=int, help="Dial an existing reminder by ID."
+    )
     parser.add_argument(
         "--to",
         help=(
@@ -530,7 +539,9 @@ def main() -> int:
     parser.add_argument(
         "--language", default="Hindi", help="'Hindi' or 'English' (default: Hindi)."
     )
-    parser.add_argument("--list", action="store_true", help="List registered reminders.")
+    parser.add_argument(
+        "--list", action="store_true", help="List registered reminders."
+    )
     parser.add_argument(
         "--routing",
         action="store_true",
@@ -613,4 +624,3 @@ if __name__ == "__main__":
         # A configuration problem, not a crash: print the fix, not a traceback.
         print(f"\nSIP configuration error:\n  {exc}\n", file=sys.stderr)
         sys.exit(2)
-

@@ -2,9 +2,9 @@
   "trunk": {
     "name": "Aanya",
     "address": "your-trunk-name.pstn.twilio.com",
-    "numbers": ["+919454535137"],
-    "auth_username": "harshit05011",
-    "auth_password": "Harshit@123",
+    "numbers": ["+1234567890"],
+    "auth_username": "your_sip_username",
+    "auth_password": "your_sip_password",
     "destination_country": "in"
   }
 }

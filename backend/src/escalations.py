@@ -1,5 +1,5 @@
 """
-Human Escalation Requests for Day 7 - Voice for Bharat Challenge (Health Access).
+Human Escalation Protocol & Coordinators Notification System.
 
 Aanya has exactly two honest limits: a red-flag symptom, and a request for a
 diagnosis, a prescription or a lab-report reading. This module turns either one

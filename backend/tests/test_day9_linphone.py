@@ -25,8 +25,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-import sip_target
 from livekit import api
+
+import sip_target
 
 LINPHONE_ADDRESS = "aanya-demo@sip.linphone.org"
 PHONE = "+919454535137"
@@ -90,7 +91,13 @@ def test_parse_sip_address_scheme_is_remembered_without_a_domain():
 
 @pytest.mark.parametrize(
     "raw",
-    ["+919454535137", "9454535137", "+91 94545-35137", "(0731) 250 4900", "+17432245805"],
+    [
+        "+919454535137",
+        "9454535137",
+        "+91 94545-35137",
+        "(0731) 250 4900",
+        "+17432245805",
+    ],
 )
 def test_looks_like_phone_number_accepts_dialable_digits(raw):
     assert sip_target.looks_like_phone_number(raw) is True
@@ -146,7 +153,9 @@ def test_auto_sends_a_phone_number_to_the_pstn_trunk():
 
 
 def test_auto_sends_a_sip_address_over_sip_without_being_told():
-    target = sip_target.resolve_dial_target(f"sip:{LINPHONE_ADDRESS}", settings=_settings())
+    target = sip_target.resolve_dial_target(
+        f"sip:{LINPHONE_ADDRESS}", settings=_settings()
+    )
     assert target.kind == sip_target.KIND_SIP
     assert target.is_sip is True
     assert target.sip_call_to == "aanya-demo"  # the trunk supplies the domain
@@ -246,7 +255,9 @@ def test_a_sip_call_with_neither_trunk_nor_credential_offers_both_fixes():
     with pytest.raises(sip_target.SipConfigError) as excinfo:
         sip_target.resolve_dial_target(
             LINPHONE_ADDRESS,
-            settings=_settings(linphone_trunk_id="", auth_username="", auth_password=""),
+            settings=_settings(
+                linphone_trunk_id="", auth_username="", auth_password=""
+            ),
         )
     message = str(excinfo.value)
     assert "SIP_LINPHONE_TRUNK_ID" in message
@@ -381,7 +392,9 @@ def test_the_sip_leg_offers_encrypted_media_by_default():
     sip_target.apply_to_request(
         request, sip_target.resolve_dial_target(LINPHONE_ADDRESS, settings=_settings())
     )
-    assert request.media_encryption == sip_proto.SIPMediaEncryption.SIP_MEDIA_ENCRYPT_ALLOW
+    assert (
+        request.media_encryption == sip_proto.SIPMediaEncryption.SIP_MEDIA_ENCRYPT_ALLOW
+    )
 
 
 def test_the_pstn_leg_leaves_media_encryption_at_the_livekit_default():
@@ -414,7 +427,10 @@ def test_an_override_also_reaches_the_pstn_leg():
     target = sip_target.resolve_dial_target(
         PHONE, settings=_settings(provider="pstn", media_encryption="require")
     )
-    assert target.media_encryption == sip_proto.SIPMediaEncryption.SIP_MEDIA_ENCRYPT_REQUIRE
+    assert (
+        target.media_encryption
+        == sip_proto.SIPMediaEncryption.SIP_MEDIA_ENCRYPT_REQUIRE
+    )
 
 
 def test_an_unusable_media_encryption_mode_is_refused_by_name():
